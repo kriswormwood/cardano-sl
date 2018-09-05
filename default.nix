@@ -22,7 +22,7 @@ in
 , enablePhaseMetrics ? true
 , allowCustomConfig ? true
 , useStackBinaries ? false
-, fasterBuild ? false
+, fasterBuild ? true  # DEVOPS-1032 benchmarking
 }:
 
 with pkgs.lib;
