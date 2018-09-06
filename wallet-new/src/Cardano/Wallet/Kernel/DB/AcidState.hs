@@ -32,6 +32,8 @@ module Cardano.Wallet.Kernel.DB.AcidState (
     -- *** DELETE
   , DeleteHdRoot(..)
   , DeleteHdAccount(..)
+    -- *** CLEARING
+  , ClearDB (..)
     -- ** Software updates
   , AddUpdate(..)
   , RemoveNextUpdate(..)
@@ -613,6 +615,17 @@ deleteHdAccount accId = runUpdateDiscardSnapshot . zoom dbHdWallets $
     HD.deleteHdAccount accId
 
 {-------------------------------------------------------------------------------
+  DB cleaning
+-------------------------------------------------------------------------------}
+
+-- | caution: Clears everything in the DB.
+-- This is not one atomic operation, but two.
+clearDB :: Update DB ()
+clearDB = do
+  runUpdateNoErrors . zoom dbHdWallets $ state $ \_ -> ((), initHdWallets)
+  runUpdateNoErrors . zoom dbUpdates $ Updates.clearUpdates
+
+{-------------------------------------------------------------------------------
   Software updates
 -------------------------------------------------------------------------------}
 
@@ -659,6 +672,7 @@ makeAcidic ''DB [
     , 'updateHdAccountName
     , 'deleteHdRoot
     , 'deleteHdAccount
+    , 'clearDB
     , 'restoreHdWallet
       -- Software updates
     , 'addUpdate

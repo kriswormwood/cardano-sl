@@ -3,6 +3,7 @@
 
 module Cardano.Wallet.Kernel.Restore
     ( restoreWallet
+    , stopAllRestorations
     ) where
 
 import           Universum
@@ -297,6 +298,14 @@ updateRestorationInfo :: Kernel.PassiveWallet
                       -> IO ()
 updateRestorationInfo wallet wId upd =
   modifyMVar_ (wallet ^. walletRestorationTask) (pure . M.adjust upd wId)
+
+-- | Clears the restoration state and stops and threads.
+stopAllRestorations :: Kernel.PassiveWallet -> IO ()
+stopAllRestorations pw = do
+    mp <- takeMVar (pw ^. walletRestorationTask)
+    let vals = M.elems mp
+    mapM_ _wriCancel vals
+    putMVar (pw ^. walletRestorationTask) (M.empty)
 
 {-------------------------------------------------------------------------------
   Timing information (for throughput calculations)

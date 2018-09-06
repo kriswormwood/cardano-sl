@@ -45,8 +45,7 @@ import           Cardano.Wallet.Kernel.NodeStateAdaptor (NodeStateAdaptor)
 import           Cardano.Wallet.Kernel.Pending (cancelPending)
 import           Cardano.Wallet.Kernel.Read (getWalletSnapshot)
 import           Cardano.Wallet.Kernel.Submission (WalletSubmission,
-                     addPendings, defaultResubmitFunction, exponentialBackoff,
-                     newWalletSubmission, tick)
+                     addPendings, emptyWalletSubmission, tick)
 import           Cardano.Wallet.Kernel.Submission.Worker (tickSubmissionLayer)
 
 {-------------------------------------------------------------------------------
@@ -142,7 +141,8 @@ initPassiveWallet logMessage keystore handles node = do
         -- access to the PassiveWallet state
         preparePassiveWallet :: IO PassiveWallet
         preparePassiveWallet = do
-            submission <- newMVar (newWalletSubmission rho)
+            submission <- newMVar emptyWalletSubmission
+            submissionLock <- newMVar ()
             restore    <- newMVar Map.empty
             return PassiveWallet {
                   _walletLogMessage      = logMessage
@@ -151,10 +151,9 @@ initPassiveWallet logMessage keystore handles node = do
                 , _walletMeta            = hMeta handles
                 , _walletNode            = node
                 , _walletSubmission      = submission
+                , _walletSubmissionLock  = submissionLock
                 , _walletRestorationTask = restore
                 }
-          where
-            rho = defaultResubmitFunction (exponentialBackoff 255 1.25)
 
         -- | Since the submission layer state is not persisted, we need to initialise
         -- the submission layer with all pending transactions present in the wallet state.
@@ -189,7 +188,7 @@ bracketActiveWallet walletProtocolMagic
     submissionLayerTicker <- liftIO $ async $
       tickSubmissionLayer
         (walletPassive ^. walletLogMessage)
-        (tickFunction (walletPassive ^. walletSubmission))
+        (tickFunction (walletPassive ^. walletSubmissionLock) (walletPassive ^. walletSubmission))
     bracket
       (return ActiveWallet{..})
       (\_ -> liftIO $ do
@@ -209,12 +208,14 @@ bracketActiveWallet walletProtocolMagic
             void $ (walletSendTx walletDiffusion) tx
             sendTransactions txs
 
-        tickFunction :: MVar WalletSubmission -> IO ()
-        tickFunction submissionLayer = do
-            (cancelled, toSend) <-
-                modifyMVar submissionLayer $ \layer -> do
-                    let (e, s, state') = tick layer
-                    return (state', (e,s))
-            unless (Map.null cancelled) $
-                cancelPending walletPassive cancelled
-            sendTransactions toSend
+        tickFunction :: MVar () -> MVar WalletSubmission -> IO ()
+        tickFunction lock submissionLayer = do
+            modifyMVar_ lock $ \_ -> do
+                (cancelled, toSend) <-
+                    modifyMVar submissionLayer $ \layer -> do
+                        let (e, s, state') = tick layer
+                        return (state', (e,s))
+                unless (Map.null cancelled) $
+                    cancelPending walletPassive cancelled
+                sendTransactions toSend
+                return ()

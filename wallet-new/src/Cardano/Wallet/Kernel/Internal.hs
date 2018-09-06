@@ -17,6 +17,7 @@ module Cardano.Wallet.Kernel.Internal (
   , walletLogMessage
   , walletNode
   , walletSubmission
+  , walletSubmissionLock
   , walletRestorationTask
   , wriCurrentSlot
   , wriTargetSlot
@@ -115,6 +116,7 @@ data PassiveWallet = PassiveWallet {
       -- we already have this split: the submission layer itself is just a
       -- pure data structure, and the sending happens in a separate thread.
     , _walletSubmission      :: MVar WalletSubmission
+    , _walletSubmissionLock  :: MVar ()
 
       -- | Wallet restoration tasks. Wallets that are in the midst of a restoration
       -- will be doing background work to restore the history. This map holds a
