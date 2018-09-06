@@ -16437,6 +16437,7 @@ license = stdenv.lib.licenses.mit;
 , hspec
 , lens
 , log-warper
+, lrucache
 , monad-control
 , MonadRandom
 , optparse-applicative
@@ -16518,12 +16519,9 @@ criterion
 deepseq
 directory
 formatting
-<<<<<<< HEAD
-log-warper
-=======
 lens
+log-warper
 lrucache
->>>>>>> develop
 MonadRandom
 optparse-applicative
 random
@@ -16838,11 +16836,8 @@ license = stdenv.lib.licenses.mit;
 , hspec-core
 , kademlia
 , lens
-<<<<<<< HEAD
 , log-warper
-=======
 , monad-control
->>>>>>> develop
 , mtl
 , mwc-random
 , network
@@ -16894,11 +16889,8 @@ formatting
 hashable
 kademlia
 lens
-<<<<<<< HEAD
 log-warper
-=======
 monad-control
->>>>>>> develop
 mtl
 network
 network-transport
@@ -17952,10 +17944,7 @@ filepath
 formatting
 hedgehog
 hspec
-<<<<<<< HEAD
-=======
 hspec-core
->>>>>>> develop
 lens
 mtl
 normaldistribution
