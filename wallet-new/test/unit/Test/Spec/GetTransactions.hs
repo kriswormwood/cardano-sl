@@ -33,6 +33,7 @@ import qualified Cardano.Wallet.Kernel.Read as Kernel
 import           Cardano.Wallet.Kernel.Types (AccountId (..), WalletId (..))
 import           Cardano.Wallet.WalletLayer (walletPassiveLayer)
 import qualified Cardano.Wallet.WalletLayer as WalletLayer
+import qualified Cardano.Wallet.WalletLayer.Kernel.Conv as Kernel.Conv
 
 import qualified Test.Spec.Addresses as Addresses
 import           Test.Spec.CoinSelection.Generators (InitialBalance (..),
@@ -63,7 +64,12 @@ spec =
                         Left _         -> expectationFailure "decodeTextAddress failed"
                         Right rootAddr -> do
                             let meta = testMeta {_txMetaWalletId = rootAddr, _txMetaAccountIx = accIdx}
-                            _ <- liftIO ((WalletLayer._pwlCreateAddress layer) (V1.NewAddress Nothing accIdx (V1.WalletId wId)))
+                            _ <- liftIO $ WalletLayer.createAddress layer
+                                    (V1.NewAddress
+                                        Nothing
+                                        (V1.unsafeMkAccountIndex accIdx)
+                                        (V1.WalletId wId)
+                                    )
                             putTxMeta (pwallet ^. Kernel.walletMeta) meta
                             (result, mbCount) <- (getTxMetas hdl) (Offset 0) (Limit 10) Everything Nothing NoFilterOp NoFilterOp Nothing
                             map Isomorphic result `shouldMatchList` [Isomorphic meta]
@@ -80,14 +86,14 @@ spec =
                                         ls   -> expectationFailure $ "Tx list returned has wrong size "
                                             <> show (length ls) <> "instead of 1: ls = " <> show ls
 
-                            eiResp <- WalletLayer._pwlGetTransactions
-                                    layer
-                                    Nothing
-                                    Nothing
-                                    Nothing
-                                    (RequestParams $ PaginationParams (Page 1) (PerPage 10))
-                                    NoFilters
-                                    NoSorts
+                            eiResp <- WalletLayer.getTransactions
+                                        layer
+                                        Nothing
+                                        Nothing
+                                        Nothing
+                                        (RequestParams $ PaginationParams (Page 1) (PerPage 10))
+                                        NoFilters
+                                        NoSorts
                             mbCount `shouldBe` (Just 1)
                             case eiResp of
                                 Left l -> expectationFailure $ "returned " <> show l
@@ -100,7 +106,7 @@ spec =
                     let (AccountIdHdRnd hdAccountId)  = fixtureAccountId
                     let (HdRootId (InDb rootAddress)) = fixtureHdRootId
                     let sourceWallet = V1.WalletId (sformat build rootAddress)
-                    let accountIndex = hdAccountId ^. hdAccountIdIx . to getHdAccountIx
+                    let accountIndex = Kernel.Conv.toAccountId hdAccountId
                     let destinations =
                             fmap (\(addr, coin) -> V1.PaymentDistribution (V1.V1 addr) (V1.V1 coin)
                                 ) fixturePayees
@@ -123,14 +129,15 @@ spec =
                                 layer = walletPassiveLayer activeLayer
                                 (HdRootId hdRoot) = fixtureHdRootId
                                 wId = sformat build (view fromDb hdRoot)
-                                accIdx = hdAccountId ^. hdAccountIdIx . to getHdAccountIx
+                                accIdx = Kernel.Conv.toAccountId hdAccountId
                                 hdl = (pw ^. Kernel.walletMeta)
                             db <- Kernel.getWalletSnapshot pw
-                            let isPending = Kernel.accountIsTxPending db hdAccountId txid
+                            let isPending = Kernel.currentTxIsPending db txid hdAccountId
                             _ <- case isPending of
-                                False -> expectationFailure "txid not found in Acid State from Kernel"
-                                True -> pure ()
-                            _ <- liftIO ((WalletLayer._pwlCreateAddress layer) (V1.NewAddress Nothing accIdx (V1.WalletId wId)))
+                                Left _err -> expectationFailure "hdAccountId not found in Acid State from Kernel"
+                                Right False -> expectationFailure "txid not found in Acid State from Kernel"
+                                Right True -> pure ()
+                            _ <- liftIO (WalletLayer.createAddress layer (V1.NewAddress Nothing accIdx (V1.WalletId wId)))
                             (result, mbCount) <- (getTxMetas hdl) (Offset 0) (Limit 10) Everything Nothing NoFilterOp NoFilterOp Nothing
                             map Isomorphic result `shouldMatchList` [Isomorphic meta]
                             let check WalletResponse{..} = do
@@ -146,14 +153,14 @@ spec =
                                         ls   -> expectationFailure $ "Tx list returned has wrong size "
                                             <> show (length ls) <> "instead of 1: ls = " <> show ls
 
-                            eiResp <- WalletLayer._pwlGetTransactions
-                                    layer
-                                    Nothing
-                                    Nothing
-                                    Nothing
-                                    (RequestParams $ PaginationParams (Page 1) (PerPage 10))
-                                    NoFilters
-                                    NoSorts
+                            eiResp <- WalletLayer.getTransactions
+                                        layer
+                                        Nothing
+                                        Nothing
+                                        Nothing
+                                        (RequestParams $ PaginationParams (Page 1) (PerPage 10))
+                                        NoFilters
+                                        NoSorts
                             mbCount `shouldBe` (Just 1)
                             case eiResp of
                                 Left l -> expectationFailure $ "returned " <> show l

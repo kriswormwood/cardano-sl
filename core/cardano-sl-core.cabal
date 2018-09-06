@@ -96,10 +96,7 @@ library
                        -- Configuration
                        Pos.Core.Configuration.BlockVersionData
                        Pos.Core.Configuration.Core
-                       Pos.Core.Configuration.GeneratedSecrets
-                       Pos.Core.Configuration.GenesisData
                        Pos.Core.Configuration.GenesisHash
-                       Pos.Core.Configuration.Protocol
 
                        -- Context
                        Pos.Core.Context.PrimaryKey
@@ -111,7 +108,6 @@ library
                        Pos.Core.Delegation.Proof
 
                        -- Genesis
-                       Pos.Core.Genesis.Canonical
                        Pos.Core.Genesis.Generate
                        Pos.Core.Genesis.AvvmBalances
                        Pos.Core.Genesis.Data
@@ -205,7 +201,6 @@ library
                      , formatting
                      , hashable
                      , lens
-                     , log-warper >= 1.0.3
                      , parsec
                      , memory
                      , mmorph
@@ -249,7 +244,6 @@ library
                        NoImplicitPrelude
                        OverloadedStrings
                        RankNTypes
-                       RecordWildCards
                        TypeApplications
                        TypeFamilies
                        TupleSections
@@ -286,7 +280,6 @@ test-suite test
                        Test.Pos.Core.Chrono
                        Test.Pos.Core.ChronoSpec
                        Test.Pos.Core.CoinSpec
-                       Test.Pos.Core.EnumEmpTest
                        Test.Pos.Core.ExampleHelpers
                        Test.Pos.Core.Gen
                        Test.Pos.Core.Json
@@ -297,6 +290,7 @@ test-suite test
                        Test.Pos.Core.Arbitrary
                        Test.Pos.Core.Arbitrary.Slotting
                        Test.Pos.Core.Arbitrary.Unsafe
+                       Test.Pos.Core.Dummy
 
   build-depends:       base
                      , base16-bytestring
@@ -351,7 +345,6 @@ test-suite test
                         DefaultSignatures
                         NoImplicitPrelude
                         OverloadedStrings
-                        RecordWildCards
                         TypeApplications
                         TupleSections
                         ViewPatterns

@@ -1,6 +1,7 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE CPP                 #-}
 {-# LANGUAGE RankNTypes          #-}
+{-# LANGUAGE RecordWildCards     #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TemplateHaskell     #-}
 {-# LANGUAGE TupleSections       #-}
@@ -12,7 +13,6 @@ module Main
 import           Universum
 
 import           Data.Maybe (fromJust)
-import           System.Wlog (LoggerName, logInfo)
 
 import           ExplorerNodeOptions (ExplorerArgs (..), ExplorerNodeArgs (..),
                      getExplorerNodeOptions)
@@ -22,8 +22,7 @@ import           Pos.Client.CLI (CommonNodeArgs (..), NodeArgs (..),
                      getNodeParams)
 import qualified Pos.Client.CLI as CLI
 import           Pos.Context (NodeContext (..))
-import           Pos.Core (epochSlots)
-import           Pos.Crypto (ProtocolMagic)
+import           Pos.Core as Core (Config (..))
 import           Pos.Explorer.DB (explorerInitDB)
 import           Pos.Explorer.ExtraContext (makeExtraCtx)
 import           Pos.Explorer.Socket (NotifierSettings (..))
@@ -39,6 +38,7 @@ import           Pos.Launcher.Configuration (AssetLockPath (..))
 import           Pos.Util (logException)
 import           Pos.Util.CompileInfo (HasCompileInfo, withCompileInfo)
 import           Pos.Util.UserSecret (usVss)
+import           Pos.Util.Wlog (LoggerName, logInfo)
 import           Pos.Worker.Update (updateTriggerWorker)
 
 loggerName :: LoggerName
@@ -58,25 +58,41 @@ main = do
 
 action :: ExplorerNodeArgs -> IO ()
 action (ExplorerNodeArgs (cArgs@CommonNodeArgs{..}) ExplorerArgs{..}) =
+<<<<<<< HEAD
     withConfigurations blPath conf $ \pm walletConfig txpConfig ntpConfig ->
     withCompileInfo $ do
         CLI.printInfoOnStart cArgs walletConfig ntpConfig txpConfig
+=======
+    withConfigurations blPath conf $ \coreConfig txpConfig ntpConfig ->
+    withCompileInfo $ do
+        CLI.printInfoOnStart cArgs
+                             (configGenesisData coreConfig)
+                             ntpConfig
+                             txpConfig
+>>>>>>> develop
         logInfo $ "Explorer is enabled!"
-        currentParams <- getNodeParams loggerName cArgs nodeArgs
+        currentParams <- getNodeParams
+            loggerName
+            cArgs
+            nodeArgs
+            (configGeneratedSecrets coreConfig)
 
         let vssSK = fromJust $ npUserSecret currentParams ^. usVss
         let sscParams = CLI.gtSscParams cArgs vssSK (npBehaviorConfig currentParams)
 
         let plugins :: [Diffusion ExplorerProd -> ExplorerProd ()]
             plugins =
-                [ explorerPlugin webPort
-                , notifierPlugin NotifierSettings{ nsPort = notifierPort }
+                [ explorerPlugin coreConfig webPort
+                , notifierPlugin coreConfig NotifierSettings {nsPort = notifierPort}
                 , updateTriggerWorker
                 ]
-        bracketNodeResources currentParams sscParams
-            (explorerTxpGlobalSettings pm txpConfig)
-            (explorerInitDB pm epochSlots) $ \nr@NodeResources {..} ->
-                runExplorerRealMode pm txpConfig nr (runNode pm txpConfig nr plugins)
+        bracketNodeResources
+            coreConfig
+            currentParams
+            sscParams
+            (explorerTxpGlobalSettings coreConfig txpConfig)
+            (explorerInitDB coreConfig) $ \nr@NodeResources {..} ->
+                runExplorerRealMode coreConfig txpConfig nr (runNode coreConfig txpConfig nr plugins)
   where
 
     blPath :: Maybe AssetLockPath
@@ -87,16 +103,16 @@ action (ExplorerNodeArgs (cArgs@CommonNodeArgs{..}) ExplorerArgs{..}) =
 
     runExplorerRealMode
         :: (HasConfigurations,HasCompileInfo)
-        => ProtocolMagic
+        => Core.Config
         -> TxpConfiguration
         -> NodeResources ExplorerExtraModifier
         -> (Diffusion ExplorerProd -> ExplorerProd ())
         -> IO ()
-    runExplorerRealMode pm txpConfig nr@NodeResources{..} go =
+    runExplorerRealMode coreConfig txpConfig nr@NodeResources{..} go =
         let NodeContext {..} = nrContext
-            extraCtx = makeExtraCtx
+            extraCtx = makeExtraCtx coreConfig
             explorerModeToRealMode  = runExplorerProd extraCtx
-         in runRealMode pm txpConfig nr $ \diffusion ->
+         in runRealMode coreConfig txpConfig nr $ \diffusion ->
                 explorerModeToRealMode (go (hoistDiffusion (lift . lift) explorerModeToRealMode diffusion))
 
     nodeArgs :: NodeArgs

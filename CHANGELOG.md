@@ -5,6 +5,13 @@
 
 ### Features
 
+- #### Reduce number of files on disk
+  Blund files (containing blocks and their undos) for older epochs (from zero up to current
+  epoch minus two) are now consolidated into epoch/index file pairs. That means that the number
+  of files to store the block chain for a single epoch is reduced from 21600 (one blund file for
+  each slot in an epoch) to an epoch/index file pair. Consolidation happens on-the-fly in a
+  background process.
+
 ### Fixes
 
 - #### Make productionReporter more robust
@@ -14,11 +21,21 @@
 
 [PR 3365]: https://github.com/input-output-hk/cardano-sl/pull/3365
 
+- Improve type safety (and as a consequence, API documentation) of account indexes (CBR-306)
+
 ### Improvements
+
+- Friendly error mistakes from deserializing invalid addresses instead of brutal 500 (CBR-283)
+
+- **[API BREAKING CHANGE]** Add `walletId` to `WalletAlreadyExists` WalletLayerError (CBR-254)
+
+- Small refactor of wallet Errors implementation to be more maintainable (CBR-26)
 
 ### Specifications
 
 ### Documentation
+
+- Make an inventory of existing wallet errors and exceptions (CBR-307)
 
 
 ## Cardano SL 1.3.0

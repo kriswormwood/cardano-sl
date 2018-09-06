@@ -1,7 +1,8 @@
-{-# LANGUAGE CPP            #-}
-{-# LANGUAGE KindSignatures #-}
-{-# LANGUAGE Rank2Types     #-}
-{-# LANGUAGE TypeOperators  #-}
+{-# LANGUAGE CPP             #-}
+{-# LANGUAGE KindSignatures  #-}
+{-# LANGUAGE Rank2Types      #-}
+{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE TypeOperators   #-}
 
 -- | Resources used by node and ways to deal with them.
 
@@ -10,8 +11,6 @@ module Pos.Launcher.Resource
          -- * Full resources
          NodeResources (..)
 
-       , allocateNodeResources
-       , releaseNodeResources
        , bracketNodeResources
 
          -- * Smaller resources
@@ -20,16 +19,18 @@ module Pos.Launcher.Resource
 
 import           Universum
 
+import           Control.Concurrent.Async.Lifted (Async)
+import qualified Control.Concurrent.Async.Lifted as Async
 import           Control.Concurrent.STM (newEmptyTMVarIO, newTBQueueIO)
 import           Control.Exception.Base (ErrorCall (..))
 import           Data.Default (Default)
 import qualified Data.Time as Time
 import           Formatting (sformat, shown, (%))
-import           System.IO (BufferMode (..), hClose, hSetBuffering)
-import qualified System.Metrics as Metrics
-import           System.Wlog (LoggerConfig (..), WithLogger, consoleActionB,
+import           Pos.Util.Wlog (LoggerConfig (..), WithLogger, consoleActionB,
                      defaultHandleAction, logDebug, logInfo, maybeLogsDirB,
                      productionB, removeAllHandlers, setupLogging, showTidB)
+import           System.IO (BufferMode (..), hClose, hSetBuffering)
+import qualified System.Metrics as Metrics
 
 import           Network.Broadcast.OutboundQueue.Types (NodeType (..))
 import           Pos.Binary ()
@@ -40,11 +41,11 @@ import           Pos.Client.CLI.Util (readLoggerConfig)
 import           Pos.Configuration
 import           Pos.Context (ConnectedPeers (..), NodeContext (..),
                      StartTime (..))
-import           Pos.Core (HasConfiguration, Timestamp, genesisData)
-import           Pos.Core.Genesis (gdStartTime)
+import           Pos.Core as Core (Config, HasConfiguration, Timestamp,
+                     configBlkSecurityParam, configEpochSlots, configStartTime)
 import           Pos.Core.Reporting (initializeMisbehaviorMetrics)
 import           Pos.DB (MonadDBRead, NodeDBs)
-import           Pos.DB.Block (mkSlogContext)
+import           Pos.DB.Block (consolidateWorker, mkSlogContext)
 import           Pos.DB.Delegation (mkDelegationVar)
 import           Pos.DB.Lrc (LrcContext (..), mkLrcSyncData)
 import           Pos.DB.Rocks (closeNodeDBs, openNodeDBs)
@@ -69,8 +70,8 @@ import           Pos.Launcher.Param (BaseParams (..), LoggingParams (..),
 import           Pos.Util (bracketWithLogging, newInitFuture)
 
 #ifdef linux_HOST_OS
+import qualified Pos.Util.Wlog as Logger
 import qualified System.Systemd.Daemon as Systemd
-import qualified System.Wlog as Logger
 #endif
 
 ----------------------------------------------------------------------------
@@ -87,6 +88,7 @@ data NodeResources ext = NodeResources
     , nrJsonLogConfig :: !JsonLogConfig
     -- ^ Config for optional JSON logging.
     , nrEkgStore      :: !Metrics.Store
+    , nrConsolidate   :: !(Async ())
     }
 
 ----------------------------------------------------------------------------
@@ -102,12 +104,13 @@ allocateNodeResources
        , HasDlgConfiguration
        , HasBlockConfiguration
        )
-    => NodeParams
+    => Core.Config
+    -> NodeParams
     -> SscParams
     -> TxpGlobalSettings
     -> InitMode ()
     -> IO (NodeResources ext)
-allocateNodeResources np@NodeParams {..} sscnp txpSettings initDB = do
+allocateNodeResources coreConfig np@NodeParams {..} sscnp txpSettings initDB = do
     logInfo "Allocating node resources..."
     npDbPath <- case npDbPathM of
         Nothing -> do
@@ -133,6 +136,9 @@ allocateNodeResources np@NodeParams {..} sscnp txpSettings initDB = do
         initDB
         logDebug "Initialized DB"
 
+        consAsync <- Async.async $ consolidateWorker coreConfig
+        logDebug "Initialized block/epoch consolidation"
+
         nrEkgStore <- liftIO $ Metrics.newStore
         logDebug "Created EKG store"
 
@@ -146,12 +152,13 @@ allocateNodeResources np@NodeParams {..} sscnp txpSettings initDB = do
                 , ancdEkgStore = nrEkgStore
                 , ancdTxpMemState = txpVar
                 }
-        ctx@NodeContext {..} <- allocateNodeContext ancd txpSettings nrEkgStore
+        ctx@NodeContext {..} <-
+            allocateNodeContext coreConfig ancd txpSettings nrEkgStore
         putLrcContext ncLrcContext
         logDebug "Filled LRC Context future"
         dlgVar <- mkDelegationVar
         logDebug "Created DLG var"
-        sscState <- mkSscState
+        sscState <- mkSscState $ configEpochSlots coreConfig
         logDebug "Created SSC var"
         jsonLogHandle <-
             case npJLFile of
@@ -174,6 +181,7 @@ allocateNodeResources np@NodeParams {..} sscnp txpSettings initDB = do
             , nrTxpState = txpVar
             , nrDlgState = dlgVar
             , nrJsonLogConfig = jsonLogConfig
+            , nrConsolidate = consAsync
             , ..
             }
 
@@ -188,6 +196,7 @@ releaseNodeResources NodeResources {..} = do
             (liftIO . hClose) h
             putMVar mVarHandle h
     closeNodeDBs nrDBs
+    Async.cancel nrConsolidate
     releaseNodeContext nrContext
 
 -- | Run computation which requires 'NodeResources' ensuring that
@@ -199,16 +208,17 @@ bracketNodeResources :: forall ext a.
       , HasDlgConfiguration
       , HasBlockConfiguration
       )
-    => NodeParams
+    => Core.Config
+    -> NodeParams
     -> SscParams
     -> TxpGlobalSettings
     -> InitMode ()
     -> (HasConfiguration => NodeResources ext -> IO a)
     -> IO a
-bracketNodeResources np sp txp initDB action = do
+bracketNodeResources coreConfig np sp txp initDB action = do
     let msg = "`NodeResources'"
     bracketWithLogging msg
-            (allocateNodeResources np sp txp initDB)
+            (allocateNodeResources coreConfig np sp txp initDB)
             releaseNodeResources $ \nodeRes ->do
         -- Notify systemd we are fully operative
         -- FIXME this is not the place to notify.
@@ -257,11 +267,13 @@ data AllocateNodeContextData ext = AllocateNodeContextData
 allocateNodeContext
     :: forall ext .
       (HasConfiguration, HasNodeConfiguration, HasBlockConfiguration)
-    => AllocateNodeContextData ext
+    => Core.Config
+    -> AllocateNodeContextData ext
     -> TxpGlobalSettings
     -> Metrics.Store
     -> InitMode NodeContext
-allocateNodeContext ancd txpSettings ekgStore = do
+allocateNodeContext coreConfig ancd txpSettings ekgStore = do
+    let epochSlots = configEpochSlots coreConfig
     let AllocateNodeContextData { ancdNodeParams = np@NodeParams {..}
                                 , ancdSscParams = sscnp
                                 , ancdPutSlotting = putSlotting
@@ -278,9 +290,9 @@ allocateNodeContext ancd txpSettings ekgStore = do
     logDebug "Created StateLock metrics"
     lcLrcSync <- mkLrcSyncData >>= newTVarIO
     logDebug "Created LRC sync"
-    ncSlottingVar <- (gdStartTime genesisData,) <$> mkSlottingVar
+    ncSlottingVar <- (configStartTime coreConfig,) <$> mkSlottingVar
     logDebug "Created slotting variable"
-    ncSlottingContext <- mkSimpleSlottingStateVar
+    ncSlottingContext <- mkSimpleSlottingStateVar epochSlots
     logDebug "Created slotting context"
     putSlotting ncSlottingVar ncSlottingContext
     logDebug "Filled slotting future"
@@ -295,11 +307,11 @@ allocateNodeContext ancd txpSettings ekgStore = do
     ncStartTime <- StartTime <$> liftIO Time.getCurrentTime
     ncLastKnownHeader <- newTVarIO Nothing
     logDebug "Created last known header and shutdown flag variables"
-    ncUpdateContext <- mkUpdateContext
+    ncUpdateContext <- mkUpdateContext epochSlots
     logDebug "Created context for update"
     ncSscContext <- createSscContext sscnp
     logDebug "Created context for ssc"
-    ncSlogContext <- mkSlogContext store
+    ncSlogContext <- mkSlogContext (configBlkSecurityParam coreConfig) store
     logDebug "Created context for slog"
     -- TODO synchronize the NodeContext peers var with whatever system
     -- populates it.

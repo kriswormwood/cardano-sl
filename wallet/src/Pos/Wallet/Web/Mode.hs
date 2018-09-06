@@ -28,7 +28,6 @@ import qualified Data.HashMap.Strict as HM
 import qualified Data.HashSet as HS
 import           Data.List (partition)
 import qualified Data.Map.Strict as M
-import           System.Wlog (HasLoggerName (..))
 import           UnliftIO (MonadUnliftIO)
 
 import           Pos.Chain.Block (HasSlogContext (..), HasSlogGState (..))
@@ -81,6 +80,7 @@ import qualified Pos.Util.Modifier as MM
 import           Pos.Util.UserPublic (HasUserPublic (..))
 import           Pos.Util.UserSecret (HasUserSecret (..))
 import           Pos.Util.Util (HasLens (..))
+import           Pos.Util.Wlog (HasLoggerName (..))
 import           Pos.Wallet.Web.Tracking.Types (SyncQueue)
 import           Pos.WorkMode (MinWorkMode, RealMode, RealModeContext (..))
 
@@ -239,9 +239,7 @@ type MonadFullWalletWebMode ctx m =
 -- Instances for WalletWebMode
 ----------------------------------------------------------------------------
 
-instance (HasConfiguration, MonadSlotsData ctx WalletWebMode)
-      => MonadSlots ctx WalletWebMode
-  where
+instance MonadSlotsData ctx WalletWebMode => MonadSlots ctx WalletWebMode where
     getCurrentSlot = getCurrentSlotSimple
     getCurrentSlotBlocking = getCurrentSlotBlockingSimple
     getCurrentSlotInaccurate = getCurrentSlotInaccurateSimple
@@ -324,8 +322,8 @@ getBalanceDefault addr = do
         applyUtxoModToAddrCoinMap updates balancesAndUtxo
 
 instance HasConfiguration => MonadBalances WalletWebMode where
-    getOwnUtxos = getOwnUtxosDefault
-    getBalance = getBalanceDefault
+    getOwnUtxos = const $ getOwnUtxosDefault
+    getBalance = const $ getBalanceDefault
 
 instance (HasConfiguration)
         => MonadTxHistory WalletWebMode where
@@ -361,5 +359,5 @@ instance (HasConfigurations)
     type AddrData Pos.Wallet.Web.Mode.WalletWebMode = (AccountId, PassPhrase)
     -- We rely on the fact that Daedalus always uses HD addresses with
     -- BootstrapEra distribution.
-    getFakeChangeAddress = pure largestHDAddressBoot
-    getNewAddress = getNewAddressWebWallet
+    getFakeChangeAddress _ = pure largestHDAddressBoot
+    getNewAddress _ = getNewAddressWebWallet

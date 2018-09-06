@@ -2,18 +2,17 @@ module Cardano.Wallet.API.V1.Handlers.Wallets where
 
 import           Universum
 
+import           Servant
+
 import           Cardano.Wallet.API.Request
 import           Cardano.Wallet.API.Response
 import           Cardano.Wallet.API.V1.Types as V1
 import qualified Cardano.Wallet.API.V1.Wallets as Wallets
-
-import           Cardano.Wallet.WalletLayer (PassiveWalletLayer (..))
+import           Cardano.Wallet.WalletLayer (PassiveWalletLayer)
 import qualified Cardano.Wallet.WalletLayer as WalletLayer
 
-import qualified Cardano.Wallet.Kernel.DB.Util.IxSet as KernelIxSet
-import qualified Data.IxSet.Typed as IxSet
+import           Pos.Core.Common (Coin (..))
 
-import           Servant
 
 -- | All the @Servant@ handlers for wallet-specific operations.
 handlers :: PassiveWalletLayer IO -> ServerT Wallets.API Handler
@@ -23,7 +22,7 @@ handlers pwl =  newWallet pwl
            :<|> deleteWallet pwl
            :<|> getWallet pwl
            :<|> updateWallet pwl
-
+           :<|> getUtxoStatistics pwl
 
 -- | Creates a new or restores an existing @wallet@ given a 'NewWallet' payload.
 -- Returns to the client the representation of the created or restored
@@ -35,9 +34,7 @@ newWallet pwl newWalletRequest = do
     -- FIXME(adn) Do not allow creation or restoration of wallets if the underlying node
     -- is still catching up.
 
-    -- FIXME(adn) Wallet restoration from seed will be provided as part of
-    -- CBR-243.
-    res <- liftIO $ WalletLayer.createWallet pwl newWalletRequest
+    res <- liftIO $ WalletLayer.createWallet pwl (WalletLayer.CreateWallet newWalletRequest)
     case res of
          Left e  -> throwM e
          Right w -> return $ single w
@@ -45,7 +42,7 @@ newWallet pwl newWalletRequest = do
 -- | Returns the full (paginated) list of wallets.
 listWallets :: PassiveWalletLayer IO
             -> RequestParams
-            -> FilterOperations Wallet
+            -> FilterOperations '[WalletId, Coin] Wallet
             -> SortOperations Wallet
             -> Handler (WalletResponse [Wallet])
 listWallets pwl params fops sops = do
@@ -53,10 +50,7 @@ listWallets pwl params fops sops = do
     respondWith params
         fops
         sops
-        -- FIXME(adn) [CBR-347] We need to unify these two IxSet
-        -- wrappers, but for now let's pay the full conversion price
-        -- to get the feature shipped.
-        (pure $ IxSet.fromList . KernelIxSet.toList $ wallets)
+        (pure wallets)
 
 updatePassword :: PassiveWalletLayer IO
                -> WalletId
@@ -97,3 +91,14 @@ updateWallet pwl wid walletUpdateRequest = do
     case res of
          Left e  -> throwM e
          Right w -> return $ single w
+
+getUtxoStatistics
+    :: PassiveWalletLayer IO
+    -> WalletId
+    -> Handler (WalletResponse UtxoStatistics)
+getUtxoStatistics pwl wid = do
+    res <- liftIO $ WalletLayer.getUtxos pwl wid
+    case res of
+         Left e  -> throwM e
+         Right w ->
+            return $ single $ V1.computeUtxoStatistics V1.log10 (map snd w)

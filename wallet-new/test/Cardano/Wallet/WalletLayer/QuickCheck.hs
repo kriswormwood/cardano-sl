@@ -13,7 +13,8 @@ import           Cardano.Wallet.Orphans.Arbitrary ()
 import           Cardano.Wallet.WalletLayer (ActiveWalletLayer (..),
                      CreateAccountError (..), DeleteAccountError (..),
                      DeleteWalletError (..), GetAccountError (..),
-                     GetAccountsError (..), GetWalletError (..),
+                     GetAccountsError (..), GetUtxosError (..),
+                     GetWalletError (..), ImportWalletError (..),
                      PassiveWalletLayer (..), UpdateAccountError (..),
                      UpdateWalletError (..), UpdateWalletPasswordError (..),
                      ValidateAddressError (..))
@@ -21,7 +22,9 @@ import           Cardano.Wallet.WalletLayer (ActiveWalletLayer (..),
 import           Cardano.Wallet.API.V1.Types (V1 (..))
 
 import           Pos.Core ()
-import           Test.QuickCheck (Arbitrary, arbitrary, generate, oneof)
+import           Test.Pos.Core.Arbitrary.Txp ()
+import           Test.QuickCheck (Arbitrary (..), arbitrary, generate, oneof)
+
 
 -- | Initialize the passive wallet.
 -- The passive wallet cannot send new transactions.
@@ -35,29 +38,40 @@ bracketPassiveWallet =
   where
     passiveWalletLayer :: PassiveWalletLayer n
     passiveWalletLayer = PassiveWalletLayer
-        { _pwlCreateWallet         = \_     -> liftedGen
-        , _pwlGetWallets           =           liftedGen
-        , _pwlGetWallet            = \_     -> liftedGen
-        , _pwlUpdateWallet         = \_ _   -> liftedGen
-        , _pwlUpdateWalletPassword = \_ _   -> liftedGen
-        , _pwlDeleteWallet         = \_     -> liftedGen
+        { createWallet         = \_     -> liftedGen
+        , getWallets           =           liftedGen
+        , getWallet            = \_     -> liftedGen
+        , updateWallet         = \_ _   -> liftedGen
+        , updateWalletPassword = \_ _   -> liftedGen
+        , deleteWallet         = \_     -> liftedGen
+        , getUtxos             = \_     -> liftedGen
 
-        , _pwlCreateAccount        = \_ _   -> liftedGen
-        , _pwlGetAccounts          = \_     -> liftedGen
-        , _pwlGetAccount           = \_ _   -> liftedGen
-        , _pwlUpdateAccount        = \_ _ _ -> liftedGen
-        , _pwlDeleteAccount        = \_ _   -> liftedGen
+        , createAccount        = \_ _   -> liftedGen
+        , getAccounts          = \_     -> liftedGen
+        , getAccount           = \_ _   -> liftedGen
+        , getAccountBalance    = \_ _   -> liftedGen
+        , getAccountAddresses  = \_ _ _ _ -> liftedGen
+        , updateAccount        = \_ _ _ -> liftedGen
+        , deleteAccount        = \_ _   -> liftedGen
 
-        , _pwlCreateAddress        = \_     -> liftedGen
-        , _pwlGetAddresses         = \_     -> liftedGen
-        , _pwlValidateAddress      = \_     -> liftedGen
+        , createAddress        = \_     -> liftedGen
+        , getAddresses         = \_     -> liftedGen
+        , validateAddress      = \_     -> liftedGen
 
-        , _pwlGetTransactions      = \_ _ _ _ _ _ -> liftedGen
-        , _pwlGetTxFromMeta        = \_ -> liftedGen
+        , getTransactions      = \_ _ _ _ _ _ -> liftedGen
+        , getTxFromMeta        = \_ -> liftedGen
 
-        , _pwlApplyBlocks          = \_     -> liftedGen
-        , _pwlRollbackBlocks       = \_     -> liftedGen
-       }
+        , applyBlocks          = \_     -> liftedGen
+        , rollbackBlocks       = \_     -> liftedGen
+
+        , getNodeSettings      = liftedGen
+
+        , nextUpdate           = liftedGen
+        , applyUpdate          = liftedGen
+        , postponeUpdate       = liftedGen
+        , resetWalletState     = liftedGen
+        , importWallet         = \_ -> liftedGen
+        }
 
 -- | A utility function.
 liftedGen :: forall b n. (MonadIO n, Arbitrary b) => n b
@@ -81,6 +95,7 @@ bracketActiveWallet walletPassiveLayer _walletDiffusion =
         , pay          = \_ _ _ -> error "unimplemented"
         , estimateFees = \_ _ _ -> error "unimplemented"
         , redeemAda    = \_ -> error "unimplemented"
+        , getNodeInfo  = error "unimplemented"
         }
 
 
@@ -122,6 +137,12 @@ instance Arbitrary GetWalletError where
                       , GetWalletError . V1 <$> arbitrary
                       ]
 
+instance Arbitrary GetUtxosError where
+    arbitrary = oneof [ pure (GetUtxosWalletIdDecodingFailed "foobar")
+                      , GetUtxosGetAccountsError <$> arbitrary
+                      , GetUtxosCurrentAvailableUtxoError <$> arbitrary
+                      ]
+
 instance Arbitrary UpdateWalletPasswordError where
     arbitrary = oneof [ UpdateWalletPasswordError <$> arbitrary
                       , UpdateWalletPasswordWalletIdDecodingFailed <$> arbitrary
@@ -135,5 +156,10 @@ instance Arbitrary UpdateWalletError where
 
 instance Arbitrary ValidateAddressError where
     arbitrary = oneof [ ValidateAddressDecodingFailed <$> arbitrary
-                      , ValidateAddressNotOurs <$> arbitrary
+                      ]
+
+instance Arbitrary ImportWalletError where
+    arbitrary = oneof [ ImportWalletFileNotFound <$> arbitrary
+                      , ImportWalletNoWalletFoundInBackup <$> arbitrary
+                      , ImportWalletCreationFailed <$> arbitrary
                       ]

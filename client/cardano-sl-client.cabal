@@ -38,7 +38,6 @@ library
                      , data-default
                      , formatting
                      , lens
-                     , log-warper
                      , mtl
                      , safe-exceptions
                      , serokell-util
@@ -61,7 +60,6 @@ library
                        DefaultSignatures
                        NoImplicitPrelude
                        OverloadedStrings
-                       RecordWildCards
                        TypeApplications
                        TupleSections
                        ViewPatterns
@@ -101,6 +99,7 @@ test-suite cardano-client-test
                      , cardano-sl-chain
                      , cardano-sl-client
                      , cardano-sl-core
+                     , cardano-sl-core-test
                      , cardano-sl-crypto
                      , cardano-sl-crypto-test
                      , cardano-sl-db
@@ -135,7 +134,6 @@ test-suite cardano-client-test
                         DefaultSignatures
                         NoImplicitPrelude
                         OverloadedStrings
-                        RecordWildCards
                         TypeApplications
                         TupleSections
                         ViewPatterns

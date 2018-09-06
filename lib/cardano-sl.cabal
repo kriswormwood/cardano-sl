@@ -174,8 +174,9 @@ library
                       , http-client
                       , http-client-tls
                       , http-conduit
+                      , http-types
                       , lens
-                      , log-warper >= 1.1.1
+                      , lifted-async
                       , memory
                       , monad-control
                       , mtl
@@ -240,7 +241,6 @@ library
                         DefaultSignatures
                         NoImplicitPrelude
                         OverloadedStrings
-                        RecordWildCards
                         TypeApplications
                         TupleSections
                         ViewPatterns
@@ -324,7 +324,6 @@ test-suite cardano-test
                      , generic-arbitrary
                      , hspec
                      , lens
-                     , log-warper
                      , network-transport
                      , network-transport-inmemory
                      , pvss
@@ -360,7 +359,6 @@ test-suite cardano-test
                         DefaultSignatures
                         NoImplicitPrelude
                         OverloadedStrings
-                        RecordWildCards
                         TypeApplications
                         TupleSections
                         ViewPatterns
@@ -429,7 +427,6 @@ benchmark cardano-bench-criterion
                         DefaultSignatures
                         NoImplicitPrelude
                         OverloadedStrings
-                        RecordWildCards
                         TypeApplications
                         TupleSections
                         ViewPatterns

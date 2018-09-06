@@ -19,6 +19,7 @@ in
 , enableProfiling ? false
 , enableDebugging ? false
 , enableBenchmarks ? true
+, enablePhaseMetrics ? true
 , allowCustomConfig ? true
 , useStackBinaries ? false
 }:
@@ -56,12 +57,12 @@ let
     cardano-sl-wallet-static = justStaticExecutablesGitRev super.cardano-sl-wallet;
     cardano-sl-client = addRealTimeTestLogs super.cardano-sl-client;
     cardano-sl-generator = addRealTimeTestLogs super.cardano-sl-generator;
-    cardano-sl-auxx = justStaticExecutablesGitRev super.cardano-sl-auxx;
-    cardano-sl-wallet-new = justStaticExecutablesGitRev super.cardano-sl-wallet-new;
+    cardano-sl-auxx-static = justStaticExecutablesGitRev super.cardano-sl-auxx;
+    cardano-sl-wallet-new-static = justStaticExecutablesGitRev super.cardano-sl-wallet-new;
     cardano-sl-node-static = justStaticExecutablesGitRev self.cardano-sl-node;
     cardano-sl-explorer-static = justStaticExecutablesGitRev self.cardano-sl-explorer;
     cardano-report-server-static = justStaticExecutablesGitRev self.cardano-report-server;
-    cardano-sl-tools = justStaticExecutablesGitRev (overrideCabal super.cardano-sl-tools (drv: {
+    cardano-sl-tools-static = justStaticExecutablesGitRev (overrideCabal super.cardano-sl-tools (drv: {
       # waiting on load-command size fix in dyld
       doCheck = ! pkgs.stdenv.isDarwin;
     }));
@@ -116,6 +117,12 @@ let
     });
   };
 
+  metricOverlay = self: super: {
+    mkDerivation = args: super.mkDerivation (args // {
+      enablePhaseMetrics = true;
+    });
+  };
+
   cardanoPkgsBase = ((import ./pkgs { inherit pkgs; }).override {
     ghc = overrideDerivation pkgs.haskell.compiler.ghc822 (drv: {
       patches = drv.patches ++ [ ./ghc-8.0.2-darwin-rec-link.patch ];
@@ -123,6 +130,7 @@ let
   });
 
   activeOverlays = [ requiredOverlay ]
+      ++ optional enablePhaseMetrics metricOverlay
       ++ optional enableBenchmarks benchmarkOverlay
       ++ optional enableDebugging debugOverlay
       ++ optional forceDontCheck dontCheckOverlay;
@@ -163,7 +171,7 @@ let
       paths = attrValues (filterAttrs (name: drv: localLib.isCardanoSL name) cardanoPkgs);
       ignoreCollisions = true;
     };
-    mkDocker = { environment, connectArgs ? {} }: import ./docker.nix { inherit environment connect gitrev pkgs connectArgs; };
+    mkDocker = { environment, name ? "wallet", connectArgs ? {} }: import ./docker.nix { inherit environment name connect gitrev pkgs connectArgs; };
     stack2nix = import (pkgs.fetchFromGitHub {
       owner = "avieth";
       repo = "stack2nix";
@@ -190,7 +198,17 @@ let
       mainnet.wallet = mkDocker { environment = "mainnet"; };
       staging.wallet = mkDocker { environment = "mainnet-staging"; };
       testnet.wallet = mkDocker { environment = "testnet"; };
+      mainnet.explorer = mkDocker { environment = "mainnet"; name = "explorer"; connectArgs = { executable = "explorer"; }; };
+      staging.explorer = mkDocker { environment = "mainnet-staging"; name = "explorer"; connectArgs = { executable = "explorer"; }; };
+      testnet.explorer = mkDocker { environment = "testnet"; name = "explorer"; connectArgs = { executable = "explorer"; }; };
     };
+    acceptanceTests = let
+      acceptanceTest = pkgs.callPackage ./scripts/test/acceptance;
+      mkTest = { environment, ...}: {
+        full  = acceptanceTest { inherit environment; resume = false; };
+        quick = acceptanceTest { inherit environment; resume = true; };
+      };
+    in localLib.forEnvironments mkTest;
 
     cardano-sl-config = pkgs.runCommand "cardano-sl-config" {} ''
       mkdir -p $out/lib

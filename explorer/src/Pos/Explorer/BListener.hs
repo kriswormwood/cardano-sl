@@ -26,7 +26,6 @@ import           Data.List ((\\))
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Map as M
 import qualified Ether
-import           System.Wlog (WithLogger)
 import           UnliftIO (MonadUnliftIO)
 
 import           Pos.Chain.Block (Block, Blund, HeaderHash, MainBlock,
@@ -45,6 +44,7 @@ import           Pos.Explorer.DB (Epoch, EpochPagedBlocksKey, Page,
                      defaultPageSize, findEpochMaxPages, numOfLastTxs)
 import qualified Pos.Explorer.DB as DB
 import           Pos.Util.AssertMode (inAssertMode)
+import           Pos.Util.Wlog (WithLogger)
 
 
 ----------------------------------------------------------------------------
@@ -77,8 +77,8 @@ instance ( MonadDBRead m
          , HasConfiguration
          )
          => MonadBListener (ExplorerBListener m) where
-    onApplyBlocks     blunds = onApplyCallGeneral blunds
-    onRollbackBlocks  blunds = onRollbackCallGeneral blunds
+    onApplyBlocks      blunds = onApplyCallGeneral blunds
+    onRollbackBlocks _ blunds = onRollbackCallGeneral blunds
 
 
 ----------------------------------------------------------------------------

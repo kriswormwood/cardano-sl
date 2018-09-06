@@ -23,13 +23,14 @@ import           Universum
 import qualified Data.List.NonEmpty as NE
 import           Formatting.Buildable (Buildable (..))
 
-import           Pos.Chain.Block (MainBlock, gbBody, mainBlockSlot, mbTxs,
-                     mbWitnesses)
-import           Pos.Core.Txp (Tx, TxAux (..), TxIn (..), txInputs)
+import           Pos.Chain.Block (MainBlock, gbBody, mbTxs, mbWitnesses)
+import qualified Pos.Core as Core
+import           Pos.Core.Txp (Tx, TxAux (..), TxId, TxIn (..), txInputs)
 
 import           Formatting (bprint, (%))
 import qualified Formatting as F
 
+import           Cardano.Wallet.Kernel.DB.BlockContext
 import qualified Cardano.Wallet.Kernel.DB.HdWallet as HD
 import           Cardano.Wallet.Kernel.DB.InDb
 import           Cardano.Wallet.Kernel.DB.Resolved
@@ -88,6 +89,8 @@ type ResolvedTxInputs = NonEmpty ResolvedInput
 -- | All resolved inputs of a block
 type ResolvedBlockInputs = [ResolvedTxInputs]
 
+type RawMeta = Core.Timestamp
+
 -- | Signed transaction along with its resolved inputs
 --
 -- Constructor is marked as unsafe because the caller should make sure that
@@ -95,6 +98,7 @@ type ResolvedBlockInputs = [ResolvedTxInputs]
 data RawResolvedTx = UnsafeRawResolvedTx {
       rawResolvedTx       :: !TxAux
     , rawResolvedTxInputs :: !ResolvedTxInputs
+    , rawResolvedTxMeta   :: !RawMeta
     }
 
 -- | Invariant for 'RawResolvedTx'
@@ -104,10 +108,10 @@ invRawResolvedTx :: TxAux -> ResolvedTxInputs -> Bool
 invRawResolvedTx txAux ins = length (taTx txAux ^. txInputs) == length ins
 
 -- | Smart constructor for 'RawResolvedTx' that checks the invariant
-mkRawResolvedTx :: TxAux -> ResolvedTxInputs -> RawResolvedTx
-mkRawResolvedTx txAux ins =
+mkRawResolvedTx :: Core.Timestamp -> TxAux -> ResolvedTxInputs -> RawResolvedTx
+mkRawResolvedTx timestamp txAux ins =
     if invRawResolvedTx txAux ins
-      then UnsafeRawResolvedTx txAux ins
+      then UnsafeRawResolvedTx txAux ins timestamp
       else error "mkRawResolvedTx: invariant violation"
 
 -- | Signed block along with its resolved inputs
@@ -123,6 +127,13 @@ data RawResolvedBlock = UnsafeRawResolvedBlock {
       -- Working with these inputs is more convenient using a 'ResolvedBlock';
       -- see 'fromRawResolvedBlock'.
     , rawResolvedBlockInputs :: !ResolvedBlockInputs
+
+      -- | The creation time of this Block.
+
+    , rawTimestamp           :: !Core.Timestamp
+
+      -- | Block context
+    , rawResolvedContext     :: !BlockContext
     }
 
 -- | Invariant for 'RawResolvedBlock'
@@ -141,10 +152,12 @@ invRawResolvedBlock block ins =
 -- | Smart constructor for 'RawResolvedBlock' that checks the invariant
 mkRawResolvedBlock :: MainBlock
                    -> ResolvedBlockInputs
+                   -> Core.Timestamp
+                   -> BlockContext
                    -> RawResolvedBlock
-mkRawResolvedBlock block ins =
+mkRawResolvedBlock block ins timestamp context =
     if invRawResolvedBlock block ins
-      then UnsafeRawResolvedBlock block ins
+      then UnsafeRawResolvedBlock block ins timestamp context
       else error "mkRawResolvedBlock: invariant violation"
 
 {-------------------------------------------------------------------------------
@@ -152,31 +165,34 @@ mkRawResolvedBlock block ins =
 -------------------------------------------------------------------------------}
 
 fromRawResolvedTx :: RawResolvedTx -> ResolvedTx
-fromRawResolvedTx rtx = ResolvedTx {
-      _rtxInputs  = InDb $ NE.zip inps (rawResolvedTxInputs rtx)
+fromRawResolvedTx UnsafeRawResolvedTx{..} = ResolvedTx {
+      _rtxInputs  = InDb $ NE.zip inps rawResolvedTxInputs
     , _rtxOutputs = InDb $ Core.txOuts tx
+    , _rtxMeta    = InDb $ (txId, rawResolvedTxMeta)
     }
   where
     tx :: Tx
-    tx = taTx (rawResolvedTx rtx)
+    tx = taTx rawResolvedTx
+
+    txId :: TxId
+    txId = Core.txAuxId rawResolvedTx
 
     inps :: NonEmpty TxIn
     inps = tx ^. txInputs
 
 fromRawResolvedBlock :: RawResolvedBlock -> ResolvedBlock
-fromRawResolvedBlock rb = ResolvedBlock {
-      _rbTxs    = zipWith aux (getBlockTxs b)
-                              (rawResolvedBlockInputs rb)
-    , _rbSlotId = b ^. mainBlockSlot
+fromRawResolvedBlock UnsafeRawResolvedBlock{..} = ResolvedBlock {
+      _rbTxs     = zipWith aux (getBlockTxs rawResolvedBlock)
+                               rawResolvedBlockInputs
+    , _rbContext = rawResolvedContext
+    , _rbMeta    = rawTimestamp
     }
   where
-    b = rawResolvedBlock rb
-
     -- Justification for the use of the unsafe constructor:
     -- The invariant for 'RawResolvedBlock' guarantees the invariant for the
     -- individual transactions.
     aux :: TxAux -> ResolvedTxInputs -> ResolvedTx
-    aux txAux ins = fromRawResolvedTx $ UnsafeRawResolvedTx txAux ins
+    aux txAux ins = fromRawResolvedTx $ UnsafeRawResolvedTx txAux ins rawTimestamp
 
 {-------------------------------------------------------------------------------
   Auxiliary

@@ -1,35 +1,15 @@
 module Cardano.Wallet.WalletLayer
     ( PassiveWalletLayer (..)
     , ActiveWalletLayer (..)
-    -- * Getters
-    , createWallet
-    , getWallets
-    , getWallet
-    , updateWallet
-    , updateWalletPassword
-    , deleteWallet
-
-    , createAccount
-    , getAccounts
-    , getAccount
-    , updateAccount
-    , deleteAccount
-
-    , createAddress
-    , getAddresses
-    , validateAddress
-
-    , getTransactions
-    , getTxFromMeta
-
-    , applyBlocks
-    , rollbackBlocks
-    -- * Errors
+    -- * Types
+    , CreateWallet(..)
+    -- ** Errors
     , CreateWalletError(..)
     , GetWalletError(..)
     , UpdateWalletError(..)
     , UpdateWalletPasswordError(..)
     , DeleteWalletError(..)
+    , GetUtxosError(..)
     , NewPaymentError(..)
     , EstimateFeesError(..)
     , RedeemAdaError(..)
@@ -41,30 +21,34 @@ module Cardano.Wallet.WalletLayer
     , GetTxError(..)
     , DeleteAccountError(..)
     , UpdateAccountError(..)
+    , ImportWalletError(..)
     ) where
 
 import           Universum
 
-import           Control.Lens (makeLenses)
 import           Formatting (bprint, build, formatToString, (%))
 import qualified Formatting.Buildable
 import qualified Prelude
 import           Test.QuickCheck (Arbitrary (..), oneof)
 
 import           Pos.Chain.Block (Blund)
-import           Pos.Core (Coin)
+import           Pos.Chain.Txp (Utxo)
+import           Pos.Core (Coin, Timestamp)
 import           Pos.Core.Chrono (NE, NewestFirst (..), OldestFirst (..))
-import           Pos.Core.Txp (Tx)
-import           Pos.Crypto (PassPhrase)
+import           Pos.Core.Txp (Tx, TxId)
+import           Pos.Core.Update (SoftwareVersion)
+import           Pos.Crypto (EncryptedSecretKey, PassPhrase)
 
 import           Cardano.Wallet.API.Request (RequestParams (..))
 import           Cardano.Wallet.API.Request.Filter (FilterOperations (..))
 import           Cardano.Wallet.API.Request.Sort (SortOperations (..))
 import           Cardano.Wallet.API.Response (SliceOf (..), WalletResponse)
-import           Cardano.Wallet.API.V1.Types (Account, AccountIndex,
-                     AccountUpdate, Address, NewAccount, NewAddress, NewWallet,
-                     PasswordUpdate, Payment, Redemption, Transaction, V1 (..),
-                     Wallet, WalletAddress, WalletId, WalletUpdate)
+import           Cardano.Wallet.API.V1.Types (Account, AccountBalance,
+                     AccountIndex, AccountUpdate, Address, ForceNtpCheck,
+                     NewAccount, NewAddress, NewWallet, NodeInfo, NodeSettings,
+                     PasswordUpdate, Payment, Redemption, SpendingPassword,
+                     Transaction, V1 (..), Wallet, WalletAddress, WalletId,
+                     WalletImport, WalletUpdate)
 import qualified Cardano.Wallet.Kernel.Accounts as Kernel
 import qualified Cardano.Wallet.Kernel.Addresses as Kernel
 import           Cardano.Wallet.Kernel.CoinSelection.FromGeneric
@@ -76,10 +60,15 @@ import qualified Cardano.Wallet.Kernel.Transactions as Kernel
 import qualified Cardano.Wallet.Kernel.Wallets as Kernel
 import           Cardano.Wallet.WalletLayer.ExecutionTimeLimit
                      (TimeExecutionLimit)
+import           Cardano.Wallet.WalletLayer.Kernel.Conv (InvalidRedemptionCode)
 
 ------------------------------------------------------------
--- Errors when manipulating wallets
+-- Type & Errors when manipulating wallets
 ------------------------------------------------------------
+
+data CreateWallet =
+    CreateWallet NewWallet
+  | ImportWalletFromESK EncryptedSecretKey (Maybe SpendingPassword)
 
 data CreateWalletError =
       CreateWalletError Kernel.CreateWalletError
@@ -178,6 +167,25 @@ instance Buildable DeleteWalletError where
     build (DeleteWalletError kernelError) =
         bprint ("DeleteWalletError " % build) kernelError
 
+data GetUtxosError =
+      GetUtxosWalletIdDecodingFailed Text
+    | GetUtxosGetAccountsError Kernel.UnknownHdRoot
+    | GetUtxosCurrentAvailableUtxoError Kernel.UnknownHdAccount
+    deriving Eq
+
+instance Show GetUtxosError where
+    show = formatToString build
+
+instance Exception GetUtxosError
+
+instance Buildable GetUtxosError where
+    build (GetUtxosWalletIdDecodingFailed txt) =
+        bprint ("GetUtxosWalletIdDecodingFailed " % build) txt
+    build (GetUtxosGetAccountsError kernelError) =
+        bprint ("GetUtxosGetAccountsError " % build) kernelError
+    build (GetUtxosCurrentAvailableUtxoError kernelError) =
+        bprint ("GetUtxosCurrentAvailableUtxoError " % build) kernelError
+
 ------------------------------------------------------------
 -- Errors when dealing with addresses
 ------------------------------------------------------------
@@ -211,9 +219,6 @@ data ValidateAddressError =
     -- 'Address' the decoding failed. Unfortunately we are not able to
     -- provide a more accurate error description as 'decodeTextAddress' doesn't
     -- offer such.
-    | ValidateAddressNotOurs Address
-    -- ^ The input address is a valid 'Cardano' address, but it doesn't
-    -- belong to us.
     deriving Eq
 
 -- | Unsound show instance needed for the 'Exception' instance.
@@ -225,8 +230,6 @@ instance Exception ValidateAddressError
 instance Buildable ValidateAddressError where
     build (ValidateAddressDecodingFailed rawText) =
         bprint ("ValidateAddressDecodingFailed " % build) rawText
-    build (ValidateAddressNotOurs address) =
-        bprint ("ValidateAddressNotOurs " % build) address
 
 ------------------------------------------------------------
 -- Errors when dealing with Accounts
@@ -323,6 +326,28 @@ instance Buildable UpdateAccountError where
     build (UpdateAccountWalletIdDecodingFailed txt) =
         bprint ("UpdateAccountWalletIdDecodingFailed " % build) txt
 
+data ImportWalletError =
+      ImportWalletFileNotFound FilePath
+    | ImportWalletNoWalletFoundInBackup FilePath
+    -- ^ When trying to fetch the required information, the legacy keystore
+    -- didn't provide any.
+    | ImportWalletCreationFailed CreateWalletError
+    -- ^ When trying to import this wallet, the wallet creation failed.
+
+-- | Unsound show instance needed for the 'Exception' instance.
+instance Show ImportWalletError where
+    show = formatToString build
+
+instance Exception ImportWalletError
+
+instance Buildable ImportWalletError where
+    build (ImportWalletFileNotFound fp) =
+        bprint ("ImportWalletFileNotFound " % build) fp
+    build (ImportWalletNoWalletFoundInBackup fp) =
+        bprint ("ImportWalletNoWalletFoundInBackup " % build) fp
+    build (ImportWalletCreationFailed err) =
+        bprint ("ImportWalletCreationFailed " % build) err
+
 ------------------------------------------------------------
 -- Errors when getting Transactions
 ------------------------------------------------------------
@@ -330,7 +355,8 @@ instance Buildable UpdateAccountError where
 data GetTxError =
       GetTxMissingWalletIdError
     | GetTxAddressDecodingFailed Text
-    | GetTxInvalidSortingOperaration String
+    | GetTxInvalidSortingOperation String
+    | GetTxUnknownHdAccount Kernel.UnknownHdAccount
 
 instance Show GetTxError where
     show = formatToString build
@@ -340,14 +366,17 @@ instance Buildable GetTxError where
         bprint "GetTxMissingWalletIdError "
     build (GetTxAddressDecodingFailed txt) =
         bprint ("GetTxAddressDecodingFailed " % build) txt
-    build (GetTxInvalidSortingOperaration txt) =
-        bprint ("GetTxInvalidSortingOperaration " % build) txt
+    build (GetTxInvalidSortingOperation txt) =
+        bprint ("GetTxInvalidSortingOperation " % build) txt
+    build (GetTxUnknownHdAccount err) =
+        bprint ("GetTxUnknownHdAccount " % build) err
 
 
 instance Arbitrary GetTxError where
     arbitrary = oneof [ pure GetTxMissingWalletIdError
                       , pure (GetTxAddressDecodingFailed "by_amount")
-                      , pure (GetTxInvalidSortingOperaration "123")
+                      , pure (GetTxInvalidSortingOperation "123")
+                      , GetTxUnknownHdAccount <$> arbitrary
                       ]
 
 instance Exception GetTxError
@@ -359,144 +388,74 @@ instance Exception GetTxError
 -- | The passive wallet (data) layer. See @PassiveWallet@.
 data PassiveWalletLayer m = PassiveWalletLayer
     {
-    -- * wallets
-      _pwlCreateWallet         :: NewWallet -> m (Either CreateWalletError Wallet)
-    , _pwlGetWallets           :: m (IxSet Wallet)
-    , _pwlGetWallet            :: WalletId -> m (Either GetWalletError Wallet)
-    , _pwlUpdateWallet         :: WalletId
-                               -> WalletUpdate
-                               -> m (Either UpdateWalletError Wallet)
-    , _pwlUpdateWalletPassword :: WalletId
-                               -> PasswordUpdate
-                               -> m (Either UpdateWalletPasswordError Wallet)
-    , _pwlDeleteWallet         :: WalletId -> m (Either DeleteWalletError ())
-    -- * accounts
-    , _pwlCreateAccount        :: WalletId
-                               -> NewAccount
-                               -> m (Either CreateAccountError Account)
-    , _pwlGetAccounts          :: WalletId
-                               -> m (Either GetAccountsError (IxSet Account))
-    , _pwlGetAccount           :: WalletId
-                               -> AccountIndex
-                               -> m (Either GetAccountError Account)
-    , _pwlUpdateAccount        :: WalletId
-                               -> AccountIndex
-                               -> AccountUpdate
-                               -> m (Either UpdateAccountError Account)
-    , _pwlDeleteAccount        :: WalletId
-                               -> AccountIndex
-                               -> m (Either DeleteAccountError ())
-    -- * addresses
-    , _pwlCreateAddress        :: NewAddress
-                               -> m (Either CreateAddressError WalletAddress)
-    , _pwlGetAddresses         :: RequestParams -> m (SliceOf WalletAddress)
-    , _pwlValidateAddress      :: Text
-                               -> m (Either ValidateAddressError WalletAddress)
+    -- wallets
+      createWallet         :: CreateWallet -> m (Either CreateWalletError Wallet)
+    , getWallets           :: m (IxSet Wallet)
+    , getWallet            :: WalletId -> m (Either GetWalletError Wallet)
+    , updateWallet         :: WalletId
+                           -> WalletUpdate
+                           -> m (Either UpdateWalletError Wallet)
+    , updateWalletPassword :: WalletId
+                           -> PasswordUpdate
+                           -> m (Either UpdateWalletPasswordError Wallet)
+    , deleteWallet         :: WalletId -> m (Either DeleteWalletError ())
+    , getUtxos             :: WalletId
+                           -> m (Either GetUtxosError [(Account, Utxo)])
+    -- accounts
+    , createAccount        :: WalletId
+                           -> NewAccount
+                           -> m (Either CreateAccountError Account)
+    , getAccounts          :: WalletId
+                           -> m (Either GetAccountsError (IxSet Account))
+    , getAccount           :: WalletId
+                           -> AccountIndex
+                           -> m (Either GetAccountError Account)
+    , getAccountBalance    :: WalletId
+                           -> AccountIndex
+                           -> m (Either GetAccountError AccountBalance)
+    , getAccountAddresses  :: WalletId
+                           -> AccountIndex
+                           -> RequestParams
+                           -> FilterOperations '[V1 Address] WalletAddress
+                           -> m (Either GetAccountError (WalletResponse [WalletAddress]))
+    , updateAccount        :: WalletId
+                           -> AccountIndex
+                           -> AccountUpdate
+                           -> m (Either UpdateAccountError Account)
+    , deleteAccount        :: WalletId
+                           -> AccountIndex
+                           -> m (Either DeleteAccountError ())
+    -- addresses
+    , createAddress        :: NewAddress
+                           -> m (Either CreateAddressError WalletAddress)
+    , getAddresses         :: RequestParams -> m (SliceOf WalletAddress)
+    , validateAddress      :: Text
+                           -> m (Either ValidateAddressError WalletAddress)
 
-    -- * transactions
-    , _pwlGetTransactions      :: Maybe WalletId -> Maybe AccountIndex -> Maybe (V1 Address)
-        -> RequestParams -> FilterOperations Transaction -> SortOperations Transaction -> m (Either GetTxError (WalletResponse [Transaction]))
-    , _pwlGetTxFromMeta        :: TxMeta -> m Transaction
+    -- transactions
+    , getTransactions      :: Maybe WalletId
+                           -> Maybe AccountIndex
+                           -> Maybe (V1 Address)
+                           -> RequestParams
+                           -> FilterOperations '[V1 TxId, V1 Timestamp] Transaction
+                           -> SortOperations Transaction
+                           -> m (Either GetTxError (WalletResponse [Transaction]))
+    , getTxFromMeta        :: TxMeta -> m (Either Kernel.UnknownHdAccount Transaction)
 
-    -- * core API
-    , _pwlApplyBlocks          :: OldestFirst NE Blund -> m ()
-    , _pwlRollbackBlocks       :: NewestFirst NE Blund -> m ()
+    -- core API
+    , applyBlocks          :: OldestFirst NE Blund -> m ()
+    , rollbackBlocks       :: NewestFirst NE Blund -> m ()
+
+    -- node settings
+    , getNodeSettings      :: m NodeSettings
+
+    -- internal
+    , nextUpdate           :: m (Maybe (V1 SoftwareVersion))
+    , applyUpdate          :: m ()
+    , postponeUpdate       :: m ()
+    , resetWalletState     :: m ()
+    , importWallet         :: WalletImport -> m (Either ImportWalletError Wallet)
     }
-
-makeLenses ''PassiveWalletLayer
-
-------------------------------------------------------------
--- Passive wallet layer getters
-------------------------------------------------------------
-
-createWallet :: forall m. PassiveWalletLayer m
-             -> NewWallet
-             -> m (Either CreateWalletError Wallet)
-createWallet pwl = pwl ^. pwlCreateWallet
-
-getWallets :: forall m. PassiveWalletLayer m -> m (IxSet Wallet)
-getWallets pwl = pwl ^. pwlGetWallets
-
-getWallet :: forall m. PassiveWalletLayer m
-          -> WalletId
-          -> m (Either GetWalletError Wallet)
-getWallet pwl = pwl ^. pwlGetWallet
-
-updateWallet :: forall m. PassiveWalletLayer m
-             -> WalletId
-             -> WalletUpdate
-             -> m (Either UpdateWalletError Wallet)
-updateWallet pwl = pwl ^. pwlUpdateWallet
-
-updateWalletPassword :: forall m. PassiveWalletLayer m
-                     -> WalletId
-                     -> PasswordUpdate
-                     -> m (Either UpdateWalletPasswordError Wallet)
-updateWalletPassword pwl = pwl ^. pwlUpdateWalletPassword
-
-deleteWallet :: forall m. PassiveWalletLayer m
-             -> WalletId
-             -> m (Either DeleteWalletError ())
-deleteWallet pwl = pwl ^. pwlDeleteWallet
-
-
-createAccount :: forall m. PassiveWalletLayer m
-              -> WalletId
-              -> NewAccount
-              -> m (Either CreateAccountError Account)
-createAccount pwl = pwl ^. pwlCreateAccount
-
-getAccounts :: forall m. PassiveWalletLayer m
-            -> WalletId
-            -> m (Either GetAccountsError (IxSet Account))
-getAccounts pwl = pwl ^. pwlGetAccounts
-
-getAccount :: forall m. PassiveWalletLayer m
-           -> WalletId
-           -> AccountIndex
-           -> m (Either GetAccountError Account)
-getAccount pwl = pwl ^. pwlGetAccount
-
-updateAccount :: forall m. PassiveWalletLayer m
-              -> WalletId
-              -> AccountIndex
-              -> AccountUpdate
-              -> m (Either UpdateAccountError Account)
-updateAccount pwl = pwl ^. pwlUpdateAccount
-
-deleteAccount :: forall m. PassiveWalletLayer m
-              -> WalletId
-              -> AccountIndex
-              -> m (Either DeleteAccountError ())
-deleteAccount pwl = pwl ^. pwlDeleteAccount
-
-createAddress :: forall m. PassiveWalletLayer m
-              -> NewAddress
-              -> m (Either CreateAddressError WalletAddress)
-createAddress pwl = pwl ^. pwlCreateAddress
-
-getAddresses :: forall m. PassiveWalletLayer m
-             -> RequestParams
-             -> m (SliceOf WalletAddress)
-getAddresses pwl = pwl ^. pwlGetAddresses
-
-validateAddress :: forall m. PassiveWalletLayer m
-                -> Text
-                -> m (Either ValidateAddressError WalletAddress)
-validateAddress pwl = pwl ^. pwlValidateAddress
-
-getTransactions :: forall m. PassiveWalletLayer m -> Maybe WalletId -> Maybe AccountIndex
-    -> Maybe (V1 Address) -> RequestParams -> FilterOperations Transaction -> SortOperations Transaction -> m (Either GetTxError (WalletResponse [Transaction]))
-getTransactions pwl = pwl ^. pwlGetTransactions
-
-getTxFromMeta :: forall m. PassiveWalletLayer m -> TxMeta -> m Transaction
-getTxFromMeta pwl = pwl ^. pwlGetTxFromMeta
-
-applyBlocks :: forall m. PassiveWalletLayer m -> OldestFirst NE Blund -> m ()
-applyBlocks pwl = pwl ^. pwlApplyBlocks
-
-rollbackBlocks :: forall m. PassiveWalletLayer m -> NewestFirst NE Blund -> m ()
-rollbackBlocks pwl = pwl ^. pwlRollbackBlocks
 
 ------------------------------------------------------------
 -- Active wallet layer
@@ -509,28 +468,34 @@ data ActiveWalletLayer m = ActiveWalletLayer {
 
       -- | Performs a payment.
     , pay :: PassPhrase
-          -- ^ The \"spending password\" to decrypt the 'EncryptedSecretKey'.
+          -- The \"spending password\" to decrypt the 'EncryptedSecretKey'.
           -> InputGrouping
-          -- ^ An preference on how to group inputs during coin selection.
+          -- An preference on how to group inputs during coin selection.
           -> ExpenseRegulation
-          -- ^ Who pays the fee, if the sender or the receivers.
+          -- Who pays the fee, if the sender or the receivers.
           -> Payment
-          -- ^ The payment we need to perform.
+          -- The payment we need to perform.
           -> m (Either NewPaymentError (Tx, TxMeta))
 
       -- | Estimates the fees for a payment.
     , estimateFees :: PassPhrase
-                   -- ^ The \"spending password\" to decrypt the 'EncryptedSecretKey'.
+                   -- The \"spending password\" to decrypt the 'EncryptedSecretKey'.
                    -> InputGrouping
-                   -- ^ An preference on how to group inputs during coin selection
+                   -- An preference on how to group inputs during coin selection
                    -> ExpenseRegulation
-                   -- ^ Who pays the fee, if the sender or the receivers.
+                   -- Who pays the fee, if the sender or the receivers.
                    -> Payment
-                   -- ^ The payment we need to perform.
+                   -- The payment we need to perform.
                    -> m (Either EstimateFeesError Coin)
 
       -- | Redeem ada
-    , redeemAda :: Redemption -> m (Either RedeemAdaError Tx)
+    , redeemAda :: Redemption -> m (Either RedeemAdaError (Tx, TxMeta))
+
+      -- | Node info
+      --
+      -- This lives in the active wallet layer as the node info endpoint returns
+      -- status information about the diffusion layer
+    , getNodeInfo :: ForceNtpCheck -> m NodeInfo
     }
 
 ------------------------------------------------------------
@@ -541,6 +506,7 @@ data NewPaymentError =
       NewPaymentError Kernel.PaymentError
     | NewPaymentTimeLimitReached TimeExecutionLimit
     | NewPaymentWalletIdDecodingFailed Text
+    | NewPaymentUnknownAccountId Kernel.UnknownHdAccount
 
 -- | Unsound show instance needed for the 'Exception' instance.
 instance Show NewPaymentError where
@@ -555,6 +521,8 @@ instance Buildable NewPaymentError where
         bprint ("NewPaymentTimeLimitReached " % build) ter
     build (NewPaymentWalletIdDecodingFailed txt) =
         bprint ("NewPaymentWalletIdDecodingFailed " % build) txt
+    build (NewPaymentUnknownAccountId err) =
+        bprint ("NewPaymentUnknownAccountId " % build) err
 
 
 data EstimateFeesError =
@@ -581,8 +549,10 @@ instance Arbitrary EstimateFeesError where
                       , EstimateFeesTimeLimitReached <$> arbitrary
                       ]
 
--- | TODO: Will need to be extended
-data RedeemAdaError = RedeemAdaError
+data RedeemAdaError =
+    RedeemAdaError Kernel.RedeemAdaError
+  | RedeemAdaWalletIdDecodingFailed Text
+  | RedeemAdaInvalidRedemptionCode InvalidRedemptionCode
 
 instance Show RedeemAdaError where
     show = formatToString build
@@ -590,4 +560,9 @@ instance Show RedeemAdaError where
 instance Exception RedeemAdaError
 
 instance Buildable RedeemAdaError where
-    build RedeemAdaError = "RedeemAdaError"
+    build (RedeemAdaError err) =
+        bprint ("RedeemAdaError " % build) err
+    build (RedeemAdaWalletIdDecodingFailed txt) =
+        bprint ("RedeemAdaWalletIdDecodingFailed " % build) txt
+    build (RedeemAdaInvalidRedemptionCode txt) =
+        bprint ("RedeemAdaInvalidRedemptionCode " % build) txt

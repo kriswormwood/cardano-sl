@@ -7,32 +7,33 @@ import           Universum
 import           Control.Monad.Random.Strict (evalRandT, mapRandT)
 import           Criterion.Main (Benchmark, Benchmarkable, bench, bgroup,
                      defaultConfig, defaultMainWith, env, nf, nfIO)
-import           Criterion.Types (Config (..))
+import           Criterion.Types as Criterion (Config (..))
 import qualified Data.List.NonEmpty as NE
 import           Data.Time.Units (convertUnit)
 import           Serokell.Util.Verify (isVerSuccess)
 import           System.Random (newStdGen)
-import           System.Wlog (LoggerName (..))
 
 import           Pos.AllSecrets (mkAllSecretsSimple)
 import           Pos.Chain.Block (Block, VerifyBlockParams (..),
                      VerifyHeaderParams (..), getBlockHeader, verifyBlock,
                      verifyHeader)
+import           Pos.Core as Core (Config (..), configBootStakeholders,
+                     configEpochSlots, configGeneratedSecretsThrow)
 import           Pos.Core.Chrono (NE, OldestFirst (..), nonEmptyNewestFirst)
 import           Pos.Core.Common (BlockCount (..), unsafeCoinPortionFromDouble)
-import           Pos.Core.Configuration (genesisBlockVersionData, genesisData,
-                     genesisSecretKeys, slotSecurityParam)
-import           Pos.Core.Genesis (FakeAvvmOptions (..), GenesisData (..),
-                     GenesisInitializer (..), TestnetBalanceOptions (..))
+import           Pos.Core.Configuration (genesisBlockVersionData)
+import           Pos.Core.Genesis (FakeAvvmOptions (..),
+                     GenesisInitializer (..), TestnetBalanceOptions (..),
+                     gsSecretKeys)
 import           Pos.Core.Slotting (EpochOrSlot (..), SlotId, Timestamp (..),
                      epochIndexL, getEpochOrSlot)
 import           Pos.Core.Update (BlockVersionData (..))
-import           Pos.Crypto.Configuration (ProtocolMagic (..))
+import           Pos.Crypto (SecretKey)
 import           Pos.DB (getTipHeader)
-import           Pos.DB.Block (VerifyBlocksContext, getVerifyBlocksContext',
-                     rollbackBlocks, verifyAndApplyBlocks, verifyBlocksPrefix)
+import           Pos.DB.Block (rollbackBlocks, verifyAndApplyBlocks,
+                     verifyBlocksPrefix)
 import           Pos.DB.DB (initNodeDBs)
-import qualified Pos.DB.Lrc as LrcDB
+import           Pos.DB.Lrc (getLeadersForEpoch, lrcActionOnEpochReason)
 import           Pos.DB.Txp (txpGlobalSettings)
 import           Pos.Generator.Block (BlockGenParams (..), TxGenParams (..),
                      genBlockNoApply, genBlocks, mkBlockGenContext)
@@ -41,6 +42,7 @@ import           Pos.Launcher.Configuration (ConfigurationOptions (..),
                      withConfigurationsM)
 import           Pos.Util.CompileInfo (withCompileInfo)
 import           Pos.Util.Util (realTime)
+import           Pos.Util.Wlog (LoggerName (..))
 
 import           Test.Pos.Block.Logic.Emulation (runEmulation, sudoLiftIO)
 import           Test.Pos.Block.Logic.Mode (BlockTestContext, BlockTestMode,
@@ -48,7 +50,7 @@ import           Test.Pos.Block.Logic.Mode (BlockTestContext, BlockTestMode,
 import           Test.Pos.Block.Logic.Util (satisfySlotCheck)
 
 -- | Criterion configuration
-config :: Config
+config :: Criterion.Config
 config = defaultConfig
     { reportFile = Just "verification.html"
     }
@@ -84,26 +86,26 @@ runBTM tp ctx btm = runEmulation (getTimestamp (_tpStartTime tp)) $ runReaderT b
 -- | Benchmark which runs `verifyAndApplyBlocks` && `rollbackBlocks`.
 verifyBlocksBenchmark
     :: HasConfigurations
-    => ProtocolMagic
+    => Core.Config
+    -> [SecretKey]
     -> TestParams
     -> BlockTestContext
     -> Benchmark
-verifyBlocksBenchmark !pm !tp !ctx =
+verifyBlocksBenchmark !coreConfig !secretKeys !tp !ctx =
     bgroup "block verification"
-        [ env (runBlockTestMode tp (genEnv (BlockCount 100)))
-            $ \ ~(vctx, blocks) -> bench "verifyAndApplyBlocks" (verifyAndApplyBlocksB vctx blocks)
-        , env (runBlockTestMode tp (genEnv (BlockCount 1)))
-            $ \ ~(vctx, blocks) -> bench "verifyBlocksPrefix" (verifyBlocksPrefixB vctx blocks)
+        [ env (runBlockTestMode coreConfig tp (genEnv (BlockCount 100)))
+            $ \ ~(curSlot, blocks) -> bench "verifyAndApplyBlocks" (verifyAndApplyBlocksB curSlot blocks)
+        -- `verifyBlocksPrefix` will succeed only on the first block, it
+        -- requires that blocks are applied.
+        , env (runBlockTestMode coreConfig tp (genEnv (BlockCount 1)))
+            $ \ ~(curSlot, blocks) -> bench "verifyBlocksPrefix" (verifyBlocksPrefixB curSlot blocks)
         ]
     where
-    genEnv :: BlockCount -> BlockTestMode (VerifyBlocksContext, OldestFirst NE Block)
+    genEnv :: BlockCount -> BlockTestMode (Maybe SlotId, OldestFirst NE Block)
     genEnv bCount = do
-        initNodeDBs pm slotSecurityParam
+        initNodeDBs coreConfig
         g <- liftIO $ newStdGen
-        let secretKeys = case genesisSecretKeys of
-                Nothing -> error "verifyAndApplyBlocksBenchmark: no genesisSecretKeys"
-                Just ks -> ks
-        bs <- flip evalRandT g $ genBlocks pm (_tpTxpConfiguration tp)
+        bs <- flip evalRandT g $ genBlocks coreConfig (_tpTxpConfiguration tp)
                 (BlockGenParams
                     { _bgpSecrets = mkAllSecretsSimple secretKeys
                     , _bgpBlockCount = bCount
@@ -113,48 +115,51 @@ verifyBlocksBenchmark !pm !tp !ctx =
                         }
                     , _bgpInplaceDB = False
                     , _bgpSkipNoKey = True -- TODO: should be False?
-                    , _bgpGenStakeholders = gdBootStakeholders genesisData
-                    , _bgpTxpGlobalSettings = txpGlobalSettings pm (_tpTxpConfiguration tp)
+                    , _bgpGenStakeholders = configBootStakeholders coreConfig
+                    , _bgpTxpGlobalSettings = txpGlobalSettings
+                          coreConfig
+                          (_tpTxpConfiguration tp)
                     })
                 (maybeToList . fmap fst)
         let curSlot :: Maybe SlotId
             curSlot = case mapMaybe (either (const Nothing) Just . unEpochOrSlot . getEpochOrSlot) bs of
                 [] -> Nothing
                 ss -> Just $ maximum ss
-        vctx <- getVerifyBlocksContext' curSlot
-        return $ ( vctx, OldestFirst $ NE.fromList bs)
+        return $ (curSlot, OldestFirst $ NE.fromList bs)
 
     verifyAndApplyBlocksB
-        :: VerifyBlocksContext
+        :: Maybe SlotId
         -> OldestFirst NE Block
         -> Benchmarkable
-    verifyAndApplyBlocksB verifyBlocksCtx blocks =
+    verifyAndApplyBlocksB curSlot blocks =
         nfIO
             $ runBTM tp ctx
             $ satisfySlotCheck blocks
-            $ verifyAndApplyBlocks pm (_tpTxpConfiguration tp) verifyBlocksCtx False blocks >>= \case
+            $ verifyAndApplyBlocks coreConfig (_tpTxpConfiguration tp) curSlot False blocks >>= \case
                     Left err -> return (Just err)
                     Right (_, blunds) -> do
-                        whenJust (nonEmptyNewestFirst blunds) (rollbackBlocks pm)
+                        whenJust (nonEmptyNewestFirst blunds)
+                                 (rollbackBlocks coreConfig)
                         return Nothing
 
     verifyBlocksPrefixB
-        :: VerifyBlocksContext
+        :: Maybe SlotId
         -> OldestFirst NE Block
         -> Benchmarkable
-    verifyBlocksPrefixB verifyBlocksCtx blocks =
+    verifyBlocksPrefixB curSlot blocks =
         nfIO
             $ runBTM tp ctx
             $ satisfySlotCheck blocks
-            $ map fst <$> verifyBlocksPrefix pm verifyBlocksCtx blocks
+            $ map fst <$> verifyBlocksPrefix coreConfig curSlot blocks
 
 -- | Benchmark which runs `verifyHeader`
 verifyHeaderBenchmark
     :: HasConfigurations
-    => ProtocolMagic
+    => Core.Config
+    -> [SecretKey]
     -> TestParams
     -> Benchmark
-verifyHeaderBenchmark !pm !tp = env (runBlockTestMode tp genEnv)
+verifyHeaderBenchmark !coreConfig !secretKeys !tp = env (runBlockTestMode coreConfig tp genEnv)
         $ \ ~(block, params) -> bgroup "block verification"
             [ bench "verifyHeader" $ benchHeaderVerification
                 (getBlockHeader block, vbpVerifyHeader params)
@@ -163,15 +168,13 @@ verifyHeaderBenchmark !pm !tp = env (runBlockTestMode tp genEnv)
             ]
 
     where
+    pm = configProtocolMagic coreConfig
     genEnv :: BlockTestMode (Block, VerifyBlockParams)
     genEnv = do
-        initNodeDBs pm slotSecurityParam
+        initNodeDBs coreConfig
         g <- liftIO $ newStdGen
         eos <- getEpochOrSlot <$> getTipHeader
         let epoch = eos ^. epochIndexL
-        let secretKeys = case genesisSecretKeys of
-                Nothing -> error "verifyHeaderBench: no genesisSecretKeys"
-                Just ks -> ks
         let blockGenParams = BlockGenParams
                 { _bgpSecrets = mkAllSecretsSimple secretKeys
                 , _bgpBlockCount = BlockCount 1
@@ -181,15 +184,18 @@ verifyHeaderBenchmark !pm !tp = env (runBlockTestMode tp genEnv)
                     }
                 , _bgpInplaceDB = False
                 , _bgpSkipNoKey = True -- TODO: should be False?
-                , _bgpGenStakeholders = gdBootStakeholders genesisData
-                , _bgpTxpGlobalSettings = txpGlobalSettings pm (_tpTxpConfiguration tp)
+                , _bgpGenStakeholders = configBootStakeholders coreConfig
+                , _bgpTxpGlobalSettings =
+                      txpGlobalSettings coreConfig (_tpTxpConfiguration tp)
                 }
-        leaders <- LrcDB.lrcActionOnEpochReason epoch "genBlock" LrcDB.getLeadersForEpoch
+        leaders <- lrcActionOnEpochReason epoch "genBlock" getLeadersForEpoch
         mblock <- flip evalRandT g $ do
-            blockGenCtx <- lift $ mkBlockGenContext blockGenParams
+            blockGenCtx <- lift $ mkBlockGenContext
+                (configEpochSlots coreConfig)
+                blockGenParams
             tipHeader <- lift $ getTipHeader
             mapRandT (flip runReaderT blockGenCtx)
-                $ genBlockNoApply pm (_tpTxpConfiguration tp) eos tipHeader
+                $ genBlockNoApply coreConfig (_tpTxpConfiguration tp) eos tipHeader
         let !block = fromMaybe (error "verifyHeaderBench: failed to generate a header") mblock
 
         let !verifyHeaderParams = VerifyHeaderParams
@@ -211,7 +217,7 @@ verifyHeaderBenchmark !pm !tp = env (runBlockTestMode tp genEnv)
         nf isVerSuccess $ verifyHeader pm params header
 
     benchBlockVerification ~(block, params) =
-        nf isVerSuccess $ verifyBlock pm params block
+        nf isVerSuccess $ verifyBlock coreConfig params block
 
 
 runBenchmark :: IO ()
@@ -222,6 +228,7 @@ runBenchmark = do
             , cfoKey = "bench-validation"
             , cfoSystemStart = Just (Timestamp startTime)
             }
+<<<<<<< HEAD
     withCompileInfo $
         withConfigurationsM (LoggerName "verifyBenchmark") Nothing cfo id $ \pm _ txpConfig _ -> do
                 let tp = TestParams
@@ -236,3 +243,21 @@ runBenchmark = do
                             [ verifyBlocksBenchmark pm tp ctx
                             , verifyHeaderBenchmark pm tp
                             ]
+=======
+    withCompileInfo
+        $ withConfigurationsM (LoggerName "verifyBenchmark") Nothing cfo id
+        $ \coreConfig txpConfig _ -> do
+            let tp = TestParams
+                    { _tpStartTime = Timestamp (convertUnit startTime)
+                    , _tpBlockVersionData = genesisBlockVersionData
+                    , _tpGenesisInitializer = genesisInitializer
+                    , _tpTxpConfiguration = txpConfig
+                    }
+            secretKeys <- gsSecretKeys <$> configGeneratedSecretsThrow coreConfig
+            runEmulation startTime
+                $ initBlockTestContext coreConfig tp $ \ctx ->
+                    sudoLiftIO $ defaultMainWith config
+                        [ verifyBlocksBenchmark coreConfig secretKeys tp ctx
+                        , verifyHeaderBenchmark coreConfig secretKeys tp
+                        ]
+>>>>>>> develop

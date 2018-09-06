@@ -2,6 +2,7 @@
 {-# LANGUAGE CPP                 #-}
 {-# LANGUAGE DataKinds           #-}
 {-# LANGUAGE RankNTypes          #-}
+{-# LANGUAGE RecordWildCards     #-}
 {-# LANGUAGE TypeOperators       #-}
 
 module Main
@@ -11,7 +12,6 @@ module Main
 import           Universum
 
 import           Data.Maybe (fromJust)
-import           System.Wlog (LoggerName, logInfo)
 
 import           Ntp.Client (NtpConfiguration)
 
@@ -21,14 +21,19 @@ import           Pos.Chain.Txp (TxpConfiguration)
 import           Pos.Client.CLI (CommonNodeArgs (..), NodeArgs (..),
                      SimpleNodeArgs (..))
 import qualified Pos.Client.CLI as CLI
-import           Pos.Crypto (ProtocolMagic)
+import           Pos.Core as Core (Config (..))
 import           Pos.Launcher (HasConfigurations, NodeParams (..),
+<<<<<<< HEAD
                      WalletConfiguration, loggerBracket, runNodeReal,
                      withConfigurations)
+=======
+                     loggerBracket, runNodeRealSimple, withConfigurations)
+>>>>>>> develop
 import           Pos.Launcher.Configuration (AssetLockPath (..))
 import           Pos.Util (logException)
 import           Pos.Util.CompileInfo (HasCompileInfo, withCompileInfo)
 import           Pos.Util.UserSecret (usVss)
+import           Pos.Util.Wlog (LoggerName, logInfo)
 import           Pos.Worker.Update (updateTriggerWorker)
 
 loggerName :: LoggerName
@@ -38,19 +43,20 @@ actionWithoutWallet
     :: ( HasConfigurations
        , HasCompileInfo
        )
-    => ProtocolMagic
+    => Core.Config
     -> TxpConfiguration
     -> SscParams
     -> NodeParams
     -> IO ()
-actionWithoutWallet pm txpConfig sscParams nodeParams =
-    runNodeReal pm txpConfig nodeParams sscParams [updateTriggerWorker]
+actionWithoutWallet coreConfig txpConfig sscParams nodeParams =
+    runNodeRealSimple coreConfig txpConfig nodeParams sscParams [updateTriggerWorker]
 
 action
     :: ( HasConfigurations
        , HasCompileInfo
        )
     => SimpleNodeArgs
+<<<<<<< HEAD
     -> ProtocolMagic
     -> WalletConfiguration
     -> TxpConfiguration
@@ -58,13 +64,24 @@ action
     -> IO ()
 action (SimpleNodeArgs (cArgs@CommonNodeArgs {..}) (nArgs@NodeArgs {..})) pm walletConfig txpConfig ntpConfig = do
     CLI.printInfoOnStart cArgs walletConfig ntpConfig txpConfig
+=======
+    -> Core.Config
+    -> TxpConfiguration
+    -> NtpConfiguration
+    -> IO ()
+action (SimpleNodeArgs (cArgs@CommonNodeArgs {..}) (nArgs@NodeArgs {..})) coreConfig txpConfig ntpConfig = do
+    CLI.printInfoOnStart cArgs (configGenesisData coreConfig) ntpConfig txpConfig
+>>>>>>> develop
     logInfo "Wallet is disabled, because software is built w/o it"
-    currentParams <- CLI.getNodeParams loggerName cArgs nArgs
+    currentParams <- CLI.getNodeParams loggerName
+                                       cArgs
+                                       nArgs
+                                       (configGeneratedSecrets coreConfig)
 
     let vssSK = fromJust $ npUserSecret currentParams ^. usVss
     let sscParams = CLI.gtSscParams cArgs vssSK (npBehaviorConfig currentParams)
 
-    actionWithoutWallet pm txpConfig sscParams currentParams
+    actionWithoutWallet coreConfig txpConfig sscParams currentParams
 
 main :: IO ()
 main = withCompileInfo $ do

@@ -5,8 +5,8 @@
 {-# LANGUAGE NamedFieldPuns      #-}
 {-# LANGUAGE NoImplicitPrelude   #-}
 {-# LANGUAGE RankNTypes          #-}
+{-# LANGUAGE RecordWildCards     #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TypeApplications    #-}
 
 -- | This module implements functionality of NTP client.
 
@@ -39,7 +39,6 @@ import           Data.Typeable (Typeable)
 import           Formatting (sformat, shown, (%))
 import qualified Network.Socket as Socket
 import           Network.Socket.ByteString (recvFrom)
-import qualified System.Wlog as Wlog
 
 import           Ntp.Packet (NtpOffset, NtpPacket (..), clockOffset,
                      mkNtpPacket, ntpPacketSize)
@@ -48,6 +47,7 @@ import           Ntp.Util (AddrFamily (..), Addresses, Sockets,
                      logDebug, logInfo, logWarning, ntpTrace, resolveNtpHost,
                      runWithAddrFamily, sendPacket, udpLocalAddresses)
 import           Pos.Util.Trace (traceWith)
+import qualified Pos.Util.Wlog as Wlog
 
 data NtpStatus =
       -- | The difference between NTP time and local system time
@@ -107,8 +107,7 @@ ntpClientSettings NtpConfiguration {..} = NtpClientSettings
     { ntpServers         = ntpcServers
     , ntpResponseTimeout = fromMicroseconds $ ntpcResponseTimeout
     , ntpPollDelay       = fromMicroseconds $ ntpcPollDelay
-    , ntpSelection       = minimum . NE.map abs
-    -- ^ Take minmum of received offsets.
+    , ntpSelection       = minimum . NE.map abs -- Take minmum of received offsets.
     }
 
 mkNtpClient :: NtpClientSettings -> TVar NtpStatus -> Sockets -> IO NtpClient
@@ -147,7 +146,6 @@ updateStatus cli = updateStatus' cli fn
            , (Wlog.Info, sformat ("Evaluated clock offset "%shown%"mcs") offset)
            )
 
--- |
 -- Every `ntpPollDelay` we send a request to the list of `ntpServers`.  Before
 -- sending a request, we put `NtpSyncPending` to `ncState`.  After sending
 -- all requests we wait until either all servers responded or

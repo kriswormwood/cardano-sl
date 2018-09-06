@@ -18,7 +18,6 @@ import           Universum
 
 import           Control.Lens (makeLensesWith)
 import qualified Control.Monad.Reader as Mtl
-import           System.Wlog (HasLoggerName (..), LoggerName)
 
 import           Pos.Chain.Block (HasSlogContext (..), HasSlogGState (..))
 import           Pos.Chain.Delegation (DelegationVar)
@@ -57,6 +56,7 @@ import           Pos.Util.LoggerName (HasLoggerName' (..), askLoggerNameDefault,
 import           Pos.Util.UserPublic (HasUserPublic (..))
 import           Pos.Util.UserSecret (HasUserSecret (..))
 import           Pos.Util.Util (HasLens (..))
+import           Pos.Util.Wlog (HasLoggerName (..), LoggerName)
 import           Pos.WorkMode.Class (MinWorkMode, WorkMode)
 
 data RealModeContext ext = RealModeContext
@@ -148,9 +148,7 @@ instance {-# OVERLAPPING #-} HasLoggerName (RealMode ext) where
 instance {-# OVERLAPPING #-} CanJsonLog (RealMode ext) where
     jsonLog = jsonLogDefault
 
-instance (HasConfiguration, MonadSlotsData ctx (RealMode ext))
-      => MonadSlots ctx (RealMode ext)
-  where
+instance MonadSlotsData ctx (RealMode ext) => MonadSlots ctx (RealMode ext) where
     getCurrentSlot = getCurrentSlotSimple
     getCurrentSlotBlocking = getCurrentSlotBlockingSimple
     getCurrentSlotInaccurate = getCurrentSlotInaccurateSimple
@@ -174,7 +172,7 @@ instance HasConfiguration => MonadDB (RealMode ext) where
 
 instance MonadBListener (RealMode ext) where
     onApplyBlocks = onApplyBlocksStub
-    onRollbackBlocks = onRollbackBlocksStub
+    onRollbackBlocks _ = onRollbackBlocksStub
 
 type instance MempoolExt (RealMode ext) = ext
 

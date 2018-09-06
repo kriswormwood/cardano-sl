@@ -26,7 +26,6 @@ import           Control.Lens (lens, makeLensesWith)
 import           Control.Monad.Reader (withReaderT)
 import           Control.Monad.Trans.Resource (transResourceT)
 import           Data.Conduit (transPipe)
-import           System.Wlog (HasLoggerName (..))
 
 import           Pos.Chain.Block (HasSlogContext (..), HasSlogGState (..))
 import           Pos.Chain.Ssc (HasSscContext (..))
@@ -41,7 +40,7 @@ import           Pos.Client.Txp.History (MonadTxHistory (..),
                      saveTxDefault)
 import           Pos.Context (HasNodeContext (..))
 import           Pos.Core (Address, HasConfiguration, HasPrimaryKey (..),
-                     IsBootstrapEraAddr (..), deriveFirstHDAddress,
+                     IsBootstrapEraAddr (..), SlotCount, deriveFirstHDAddress,
                      largestPubKeyAddressBoot, largestPubKeyAddressSingleKey,
                      makePubKeyAddress, siEpoch)
 import           Pos.Core.JsonLog (CanJsonLog (..))
@@ -68,6 +67,7 @@ import           Pos.Util.CompileInfo (HasCompileInfo, withCompileInfo)
 import           Pos.Util.LoggerName (HasLoggerName' (..))
 import           Pos.Util.UserPublic (HasUserPublic (..))
 import           Pos.Util.UserSecret (HasUserSecret (..))
+import           Pos.Util.Wlog (HasLoggerName (..))
 import           Pos.WorkMode (EmptyMempoolExt, RealMode, RealModeContext (..))
 
 type AuxxMode = ReaderT AuxxContext IO
@@ -163,12 +163,10 @@ instance HasSlogGState AuxxContext where
 instance HasJsonLogConfig AuxxContext where
     jsonLogConfig = acRealModeContext_L . jsonLogConfig
 
-instance (HasConfiguration, MonadSlotsData ctx AuxxMode)
-      => MonadSlots ctx AuxxMode
-  where
-    getCurrentSlot = realModeToAuxx getCurrentSlot
-    getCurrentSlotBlocking = realModeToAuxx getCurrentSlotBlocking
-    getCurrentSlotInaccurate = realModeToAuxx getCurrentSlotInaccurate
+instance MonadSlotsData ctx AuxxMode => MonadSlots ctx AuxxMode where
+    getCurrentSlot = realModeToAuxx . getCurrentSlot
+    getCurrentSlotBlocking = realModeToAuxx . getCurrentSlotBlocking
+    getCurrentSlotInaccurate = realModeToAuxx . getCurrentSlotInaccurate
     currentTimeSlotting = realModeToAuxx currentTimeSlotting
 
 instance {-# OVERLAPPING #-} HasLoggerName AuxxMode where
@@ -204,7 +202,9 @@ instance MonadBListener AuxxMode where
     onRollbackBlocks = realModeToAuxx ... onRollbackBlocks
 
 instance HasConfiguration => MonadBalances AuxxMode where
-    getOwnUtxos addrs = ifM isTempDbUsed (getOwnUtxosGenesis addrs) (getFilteredUtxo addrs)
+    getOwnUtxos genesisData addrs = ifM isTempDbUsed
+                                        (getOwnUtxosGenesis genesisData addrs)
+                                        (getFilteredUtxo addrs)
     getBalance = getBalanceFromUtxo
 
 instance HasConfiguration =>
@@ -217,8 +217,8 @@ instance (HasConfigurations, HasCompileInfo) =>
          MonadAddresses AuxxMode where
     type AddrData AuxxMode = PublicKey
     getNewAddress = makePubKeyAddressAuxx
-    getFakeChangeAddress = do
-        epochIndex <- siEpoch <$> getCurrentSlotInaccurate
+    getFakeChangeAddress pc = do
+        epochIndex <- siEpoch <$> getCurrentSlotInaccurate pc
         gsIsBootstrapEra epochIndex <&> \case
             False -> largestPubKeyAddressBoot
             True -> largestPubKeyAddressSingleKey
@@ -236,7 +236,7 @@ type instance MempoolExt AuxxMode = EmptyMempoolExt
 instance HasConfiguration =>
          MonadTxpLocal AuxxMode where
     txpNormalize pm = withReaderT acRealModeContext . txNormalize pm
-    txpProcessTx pm txpConfig = withReaderT acRealModeContext . txProcessTransaction pm txpConfig
+    txpProcessTx coreConfig txpConfig = withReaderT acRealModeContext . txProcessTransaction coreConfig txpConfig
 
 instance HasConfigurations =>
          MonadTxpLocal (BlockGenMode EmptyMempoolExt AuxxMode) where
@@ -246,22 +246,17 @@ instance HasConfigurations =>
 -- | In order to create an 'Address' from a 'PublicKey' we need to
 -- choose suitable stake distribution. We want to pick it based on
 -- whether we are currently in bootstrap era.
-makePubKeyAddressAuxx ::
-       MonadAuxxMode m
-    => PublicKey
-    -> m Address
-makePubKeyAddressAuxx pk = do
-    epochIndex <- siEpoch <$> getCurrentSlotInaccurate
+makePubKeyAddressAuxx :: MonadAuxxMode m => SlotCount -> PublicKey -> m Address
+makePubKeyAddressAuxx epochSlots pk = do
+    epochIndex <- siEpoch <$> getCurrentSlotInaccurate epochSlots
     ibea <- IsBootstrapEraAddr <$> gsIsBootstrapEra epochIndex
     pure $ makePubKeyAddress ibea pk
 
 -- | Similar to @makePubKeyAddressAuxx@ but create HD address.
-deriveHDAddressAuxx ::
-       MonadAuxxMode m
-    => EncryptedSecretKey
-    -> m Address
-deriveHDAddressAuxx hdwSk = do
-    epochIndex <- siEpoch <$> getCurrentSlotInaccurate
+deriveHDAddressAuxx
+    :: MonadAuxxMode m => SlotCount -> EncryptedSecretKey -> m Address
+deriveHDAddressAuxx epochSlots hdwSk = do
+    epochIndex <- siEpoch <$> getCurrentSlotInaccurate epochSlots
     ibea <- IsBootstrapEraAddr <$> gsIsBootstrapEra epochIndex
     pure $ fst $ fromMaybe (error "makePubKeyHDAddressAuxx: pass mismatch") $
         deriveFirstHDAddress ibea emptyPassphrase hdwSk

@@ -18,7 +18,7 @@ module Cardano.Wallet.Client
     , withThrottlingRetry
     -- * The type of errors that the client might return
     , ClientError(..)
-    , V1Errors.WalletError(..)
+    , WalletError(..)
     , ServantError(..)
     , Response
     , GenResponse(..)
@@ -39,14 +39,15 @@ import           Control.Concurrent (threadDelay)
 import           Control.Exception (Exception (..))
 import           Servant.Client (GenResponse (..), Response, ServantError (..))
 
+import qualified Pos.Core as Core
+import qualified Pos.Core.Txp as Core
+
 import           Cardano.Wallet.API.Request.Filter
 import           Cardano.Wallet.API.Request.Pagination
 import           Cardano.Wallet.API.Request.Sort
 import           Cardano.Wallet.API.Response
-import qualified Cardano.Wallet.API.V1.Errors as V1Errors
 import           Cardano.Wallet.API.V1.Parameters
 import           Cardano.Wallet.API.V1.Types
-import qualified Pos.Core as Core
 
 -- | A representation of a wallet client parameterized over some effect
 -- type @m@.
@@ -80,7 +81,7 @@ data WalletClient m
     , getWalletIndexFilterSorts
          :: Maybe Page
          -> Maybe PerPage
-         -> FilterOperations Wallet
+         -> FilterOperations '[WalletId, Core.Coin] Wallet
          -> SortOperations Wallet
          -> Resp m [Wallet]
     , updateWalletPassword
@@ -91,6 +92,18 @@ data WalletClient m
         :: WalletId -> Resp m Wallet
     , updateWallet
          :: WalletId -> Update Wallet -> Resp m Wallet
+    , getUtxoStatistics
+        :: WalletId -> Resp m UtxoStatistics
+    , postCheckExternalWallet
+         :: PublicKeyAsBase58 -> Resp m WalletAndTxHistory
+    , postExternalWallet
+         :: New ExternalWallet -> Resp m Wallet
+    , deleteExternalWallet
+         :: PublicKeyAsBase58 -> m (Either ClientError ())
+    , postUnsignedTransaction
+         :: PaymentWithChangeAddress -> Resp m RawTransaction
+    , postSignedTransaction
+         :: SignedTransaction -> Resp m Transaction
     -- account endpoints
     , deleteAccount
          :: WalletId -> AccountIndex -> m (Either ClientError ())
@@ -107,7 +120,7 @@ data WalletClient m
          -> AccountIndex
          -> Maybe Page
          -> Maybe PerPage
-         -> FilterOperations WalletAddress
+         -> FilterOperations '[V1 Address] WalletAddress
          -> Resp m AccountAddresses
     , getAccountBalance
          :: WalletId -> AccountIndex -> Resp m AccountBalance
@@ -120,7 +133,7 @@ data WalletClient m
          -> Maybe (V1 Core.Address)
          -> Maybe Page
          -> Maybe PerPage
-         -> FilterOperations Transaction
+         -> FilterOperations '[V1 Core.TxId, V1 Core.Timestamp] Transaction
          -> SortOperations Transaction
          -> Resp m [Transaction]
     , getTransactionFee
@@ -132,7 +145,7 @@ data WalletClient m
          :: Resp m NodeSettings
     -- info
     , getNodeInfo
-         :: Resp m NodeInfo
+         :: ForceNtpCheck -> Resp m NodeInfo
     } deriving Generic
 
 -- | Paginates through all request pages and concatenates the result.
@@ -151,7 +164,7 @@ paginateAll request = fmap fixMetadata <$> paginatePage 1
   where
     fixMetadata WalletResponse{..} =
         WalletResponse
-            { wrMeta = Metadata $
+            { wrMeta = Metadata
                 PaginationMetadata
                     { metaTotalPages = 1
                     , metaPage = Page 1
@@ -214,6 +227,18 @@ hoistClient phi wc = WalletClient
         phi . getWallet wc
     , updateWallet =
         \x -> phi . updateWallet wc x
+    , getUtxoStatistics =
+         phi . getUtxoStatistics wc
+    , postCheckExternalWallet =
+        phi . postCheckExternalWallet wc
+    , postExternalWallet =
+        phi . postExternalWallet wc
+    , deleteExternalWallet =
+        phi . deleteExternalWallet wc
+    , postUnsignedTransaction =
+        phi . postUnsignedTransaction wc
+    , postSignedTransaction =
+        phi . postSignedTransaction wc
     , deleteAccount =
         \x -> phi . deleteAccount wc x
     , getAccount =
@@ -240,7 +265,7 @@ hoistClient phi wc = WalletClient
     , getNodeSettings =
         phi (getNodeSettings wc)
     , getNodeInfo =
-        phi (getNodeInfo wc)
+        phi . getNodeInfo wc
     }
 
 -- | This type represents callbacks you can use to modify how errors are
@@ -290,7 +315,7 @@ mapClientErrors handler wc = WalletClient
     , updateAccount =
         \x y -> overError . updateAccount wc x y
     , redeemAda =
-        \x y -> overError . redeemAda wc x y
+        overError . redeemAda wc
     , postTransaction =
         overError . postTransaction wc
     , getTransactionIndexFilterSorts =
@@ -301,7 +326,23 @@ mapClientErrors handler wc = WalletClient
     , getNodeSettings =
         overError (getNodeSettings wc)
     , getNodeInfo =
-        overError (getNodeInfo wc)
+        overError . getNodeInfo wc
+    , getUtxoStatistics =
+        overError . getUtxoStatistics wc
+    , postCheckExternalWallet =
+        overError . postCheckExternalWallet wc
+    , postExternalWallet =
+        overError . postExternalWallet wc
+    , deleteExternalWallet =
+        overError . deleteExternalWallet wc
+    , postUnsignedTransaction =
+        overError . postUnsignedTransaction wc
+    , postSignedTransaction =
+        overError . postSignedTransaction wc
+    , getAccountAddresses =
+        \w ai mp mpp fo -> overError (getAccountAddresses wc w ai mp mpp fo)
+    , getAccountBalance =
+        \w ai -> overError (getAccountBalance wc w ai)
     }
   where
     overError
@@ -326,7 +367,7 @@ withThrottlingRetry = mapClientErrors retry
     retry :: ResponseErrorHandler m
     retry err action =
         case err of
-            ClientWalletError (V1Errors.RequestThrottled microsTilRetry) -> do
+            ClientWalletError (RequestThrottled microsTilRetry) -> do
                 liftIO (threadDelay (fudgeFactor microsTilRetry))
                 newResult <- action
                 case newResult of
@@ -353,7 +394,7 @@ type Resp m a = m (Either ClientError (WalletResponse a))
 
 -- | The type of errors that the wallet might return.
 data ClientError
-    = ClientWalletError V1Errors.WalletError
+    = ClientWalletError WalletError
     -- ^ The 'WalletError' type represents known failures that the API
     -- might return.
     | ClientHttpError ServantError

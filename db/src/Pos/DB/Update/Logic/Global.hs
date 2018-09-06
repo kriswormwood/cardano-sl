@@ -1,3 +1,5 @@
+{-# LANGUAGE RecordWildCards #-}
+
 -- | Logic of local data processing in Update System.
 
 module Pos.DB.Update.Logic.Global
@@ -13,7 +15,6 @@ import           Universum
 
 import           Control.Monad.Except (MonadError, runExceptT)
 import           Data.Default (Default (def))
-import           System.Wlog (WithLogger, modifyLoggerName)
 import           UnliftIO (MonadUnliftIO)
 
 import           Pos.Chain.Block (ComponentBlock (..), headerHashG,
@@ -23,8 +24,9 @@ import           Pos.Chain.Update (BlockVersionState, ConfirmedProposalState,
                      PollT, PollVerFailure, ProposalState, USUndo, execPollT,
                      execRollT, getAdoptedBV, lastKnownBlockVersion,
                      reportUnexpectedError, runPollT)
-import           Pos.Core (HasCoreConfiguration, HasProtocolConstants,
-                     ProtocolMagic, StakeholderId, addressHash, epochIndexL)
+import           Pos.Core as Core (Config, HasCoreConfiguration, StakeholderId,
+                     addressHash, configBlkSecurityParam, configEpochSlots,
+                     epochIndexL)
 import           Pos.Core.Chrono (NE, NewestFirst, OldestFirst)
 import           Pos.Core.Exception (reportFatalError)
 import           Pos.Core.Reporting (MonadReporting)
@@ -44,6 +46,7 @@ import           Pos.DB.Update.Poll.Logic.Softfork (processGenesisBlock,
                      recordBlockIssuance)
 import           Pos.Util.AssertMode (inAssertMode)
 import qualified Pos.Util.Modifier as MM
+import           Pos.Util.Wlog (WithLogger, modifyLoggerName)
 
 
 ----------------------------------------------------------------------------
@@ -98,23 +101,22 @@ usApplyBlocks
     :: ( MonadThrow m
        , USGlobalApplyMode ctx m
        )
-    => ProtocolMagic
-    -> BlockVersion
+    => Core.Config
     -> OldestFirst NE UpdateBlock
     -> Maybe PollModifier
     -> m [DB.SomeBatchOp]
-usApplyBlocks pm bv blocks modifierMaybe =
+usApplyBlocks coreConfig blocks modifierMaybe =
     withUSLogger $
     processModifier =<<
     case modifierMaybe of
         Nothing -> do
-            verdict <- usVerifyBlocks pm False bv blocks
+            verdict <- usVerifyBlocks coreConfig False blocks
             either onFailure (return . fst) verdict
         Just modifier -> do
             -- TODO: I suppose such sanity checks should be done at higher
             -- level.
             inAssertMode $ do
-                verdict <- usVerifyBlocks pm False bv blocks
+                verdict <- usVerifyBlocks coreConfig False blocks
                 whenLeft verdict $ \v -> onFailure v
             return modifier
   where
@@ -164,18 +166,18 @@ usVerifyBlocks ::
        , MonadUnliftIO m
        , MonadReporting m
        )
-    => ProtocolMagic
+    => Core.Config
     -> Bool
-    -> BlockVersion
     -> OldestFirst NE UpdateBlock
     -> m (Either PollVerFailure (PollModifier, OldestFirst NE USUndo))
-usVerifyBlocks pm verifyAllIsKnown adoptedBV blocks =
+usVerifyBlocks coreConfig verifyAllIsKnown blocks =
     withUSLogger $
     reportUnexpectedError $
     processRes <$> run (runExceptT action)
   where
     action = do
-        mapM (verifyBlock pm adoptedBV verifyAllIsKnown) blocks
+        lastAdopted <- getAdoptedBV
+        mapM (verifyBlock coreConfig lastAdopted verifyAllIsKnown) blocks
     run :: PollT (DBPoll n) a -> n (a, PollModifier)
     run = runDBPoll . runPollT def
     processRes ::
@@ -185,14 +187,19 @@ usVerifyBlocks pm verifyAllIsKnown adoptedBV blocks =
     processRes (Right undos, modifier) = Right (modifier, undos)
 
 verifyBlock
-    :: (USGlobalVerifyMode ctx m, MonadPoll m, MonadError PollVerFailure m, HasProtocolConstants)
-    => ProtocolMagic -> BlockVersion -> Bool -> UpdateBlock -> m USUndo
-verifyBlock _ _ _ (ComponentBlockGenesis genBlk) =
-    execRollT $ processGenesisBlock (genBlk ^. epochIndexL)
-verifyBlock pm lastAdopted verifyAllIsKnown (ComponentBlockMain header payload) =
+    :: (USGlobalVerifyMode ctx m, MonadPoll m, MonadError PollVerFailure m)
+    => Core.Config
+    -> BlockVersion
+    -> Bool
+    -> UpdateBlock
+    -> m USUndo
+verifyBlock coreConfig _ _ (ComponentBlockGenesis genBlk) =
+    execRollT $ processGenesisBlock (configEpochSlots coreConfig)
+                                    (genBlk ^. epochIndexL)
+verifyBlock coreConfig lastAdopted verifyAllIsKnown (ComponentBlockMain header payload) =
     execRollT $ do
         verifyAndApplyUSPayload
-            pm
+            coreConfig
             lastAdopted
             verifyAllIsKnown
             (Right header)
@@ -203,6 +210,7 @@ verifyBlock pm lastAdopted verifyAllIsKnown (ComponentBlockMain header payload) 
         -- we assume that block version is confirmed.
         let leaderPk = header ^. headerLeaderKeyL
         recordBlockIssuance
+            (configBlkSecurityParam coreConfig)
             (addressHash leaderPk)
             (header ^. blockVersionL)
             (header ^. headerSlotL)

@@ -35,7 +35,6 @@ import           Data.Default (def)
 import           Formatting (bprint, build, formatToString, (%))
 import qualified Formatting.Buildable
 import qualified Prelude
-import           System.Wlog (HasLoggerName (..), LoggerName)
 import           Test.Hspec (Spec)
 import           Test.Hspec.QuickCheck (prop)
 import           Test.QuickCheck (Arbitrary (..), Property, Testable (..),
@@ -95,6 +94,7 @@ import           Pos.Util.LoggerName (HasLoggerName' (..), askLoggerNameDefault,
 import           Pos.Util.UserPublic (HasUserPublic (..), UserPublic)
 import           Pos.Util.UserSecret (HasUserSecret (..), UserSecret)
 import           Pos.Util.Util (HasLens (..))
+import           Pos.Util.Wlog (HasLoggerName (..), LoggerName)
 import           Pos.Wallet.Redirect (applyLastUpdateWebWallet,
                      blockchainSlotDurationWebWallet, connectedPeersWebWallet,
                      localChainDifficultyWebWallet,
@@ -120,6 +120,7 @@ import           Test.Pos.Block.Logic.Mode (BlockTestContext (..),
                      getCurrentSlotBlockingTestDefault,
                      getCurrentSlotInaccurateTestDefault,
                      getCurrentSlotTestDefault, initBlockTestContext)
+import           Test.Pos.Core.Dummy (dummyConfig, dummyEpochSlots)
 
 ----------------------------------------------------------------------------
 -- Parameters
@@ -198,25 +199,28 @@ initWalletTestContext ::
     -> (WalletTestContext -> Emulation a)
     -> Emulation a
 initWalletTestContext WalletTestParams {..} callback =
-    initBlockTestContext _wtpBlockTestParams $ \wtcBlockTestContext -> do
-        wtc <- liftIO $ do
-            wtcWalletState <- openMemState
-            wtcUserPublic <- STM.newTVarIO def
-            wtcUserSecret <- STM.newTVarIO def
-            wtcRecoveryHeader <- STM.newEmptyTMVarIO
-            -- some kind of kostil to get tip
-            tip <- readTVarIO $ txpTip $ btcTxpMem wtcBlockTestContext
-            wtcStateLock <- newStateLock tip
-            store <- liftIO $ Metrics.newStore
-            wtcStateLockMetrics <- liftIO $ recordTxpMetrics store (txpMemPool $ btcTxpMem wtcBlockTestContext)
-            wtcShutdownContext <- ShutdownContext <$> STM.newTVarIO False
-            wtcConnectedPeers <- ConnectedPeers <$> STM.newTVarIO mempty
-            wtcLastKnownHeader <- STM.newTVarIO Nothing
-            wtcSentTxs <- STM.newTVarIO mempty
-            wtcSyncQueue <- STM.newTQueueIO
-            wtcSlottingStateVar <- mkSimpleSlottingStateVar
-            pure WalletTestContext {..}
-        callback wtc
+    initBlockTestContext dummyConfig _wtpBlockTestParams
+        $ \wtcBlockTestContext -> do
+            wtc <- liftIO $ do
+                wtcWalletState <- openMemState
+                wtcUserPublic <- STM.newTVarIO def
+                wtcUserSecret <- STM.newTVarIO def
+                wtcRecoveryHeader <- STM.newEmptyTMVarIO
+                -- some kind of kostil to get tip
+                tip <- readTVarIO $ txpTip $ btcTxpMem wtcBlockTestContext
+                wtcStateLock <- newStateLock tip
+                store <- liftIO $ Metrics.newStore
+                wtcStateLockMetrics <- liftIO $ recordTxpMetrics
+                    store
+                    (txpMemPool $ btcTxpMem wtcBlockTestContext)
+                wtcShutdownContext <- ShutdownContext <$> STM.newTVarIO False
+                wtcConnectedPeers <- ConnectedPeers <$> STM.newTVarIO mempty
+                wtcLastKnownHeader <- STM.newTVarIO Nothing
+                wtcSentTxs <- STM.newTVarIO mempty
+                wtcSyncQueue <- STM.newTQueueIO
+                wtcSlottingStateVar <- mkSimpleSlottingStateVar dummyEpochSlots
+                pure WalletTestContext {..}
+            callback wtc
 
 runWalletTestMode ::
        ( HasConfiguration
@@ -298,11 +302,10 @@ instance HasLens DelegationVar WalletTestContext DelegationVar where
 instance HasLens SscMemTag WalletTestContext SscState where
     lensOf = wtcBlockTestContext_L . lensOf @SscMemTag
 
-instance (HasConfiguration, MonadSlotsData ctx WalletTestMode)
-       => MonadSlots ctx WalletTestMode where
-    getCurrentSlot = getCurrentSlotTestDefault
-    getCurrentSlotBlocking = getCurrentSlotBlockingTestDefault
-    getCurrentSlotInaccurate = getCurrentSlotInaccurateTestDefault
+instance MonadSlotsData ctx WalletTestMode => MonadSlots ctx WalletTestMode where
+    getCurrentSlot _ = getCurrentSlotTestDefault
+    getCurrentSlotBlocking _ = getCurrentSlotBlockingTestDefault
+    getCurrentSlotInaccurate _ = getCurrentSlotInaccurateTestDefault
     currentTimeSlotting = currentTimeSlottingTestDefault
 
 instance HasUserPublic WalletTestContext where
@@ -336,9 +339,9 @@ instance {-# OVERLAPPING #-} HasLoggerName WalletTestMode where
 instance HasConfiguration => MonadDBRead WalletTestMode where
     dbGet = DB.dbGetPureDefault
     dbIterSource = DB.dbIterSourcePureDefault
-    dbGetSerBlock = DB.dbGetSerBlockPureDefault
-    dbGetSerUndo = DB.dbGetSerUndoPureDefault
-    dbGetSerBlund = DB.dbGetSerBlundPureDefault
+    dbGetSerBlock = const DB.dbGetSerBlockPureDefault
+    dbGetSerUndo = const DB.dbGetSerUndoPureDefault
+    dbGetSerBlund = const DB.dbGetSerBlundPureDefault
 
 instance HasConfiguration => MonadDB WalletTestMode where
     dbPut = DB.dbPutPureDefault
@@ -388,8 +391,8 @@ instance HasLens (StateLockMetrics MemPoolModifyReason) WalletTestContext (State
 
 instance HasConfigurations => MonadAddresses WalletTestMode where
     type AddrData WalletTestMode = (AccountId, PassPhrase)
-    getNewAddress = getNewAddressWebWallet
-    getFakeChangeAddress = pure largestHDAddressBoot
+    getNewAddress _ = getNewAddressWebWallet
+    getFakeChangeAddress _ = pure largestHDAddressBoot
 
 instance MonadKeysRead WalletTestMode where
     getPublic = getPublicDefault
@@ -405,8 +408,8 @@ instance (HasConfigurations) => MonadTxHistory WalletTestMode where
     saveTx = saveTxDefault
 
 instance HasConfiguration => MonadBalances WalletTestMode where
-    getOwnUtxos = getOwnUtxosDefault
-    getBalance = getBalanceDefault
+    getOwnUtxos = const $ getOwnUtxosDefault
+    getBalance = const $ getBalanceDefault
 
 instance MonadUpdates WalletTestMode where
     waitForUpdate = waitForUpdateWebWallet

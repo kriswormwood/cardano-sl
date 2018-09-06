@@ -1,10 +1,12 @@
 {-# LANGUAGE DeriveFunctor   #-}
 {-# LANGUAGE DeriveGeneric   #-}
+{-# LANGUAGE LambdaCase      #-}
 {-# LANGUAGE OverloadedLists #-}
 module Cardano.Wallet.API.Response (
     Metadata (..)
   , ResponseStatus(..)
   , WalletResponse(..)
+  , JSONValidationError(..)
   -- * Generating responses for collections
   , respondWith
   , fromSlice
@@ -18,23 +20,27 @@ module Cardano.Wallet.API.Response (
   ) where
 
 import           Prelude
-import           Universum (Buildable, decodeUtf8, toText, (<>))
+import           Universum (Buildable, Exception, Text, decodeUtf8, toText,
+                     (<>))
 
-import           Cardano.Wallet.API.Response.JSend (ResponseStatus (..))
-import           Cardano.Wallet.API.V1.Swagger.Example (Example, example)
-import           Control.Lens
-import           Data.Aeson
+import           Control.Lens hiding (Indexable)
+import           Data.Aeson (FromJSON (..), ToJSON (..), eitherDecode, encode)
 import           Data.Aeson.Encode.Pretty (encodePretty)
+import qualified Data.Aeson.Options as Serokell
 import           Data.Aeson.TH
+import qualified Data.Char as Char
 import           Data.Swagger as S hiding (Example, example)
 import           Data.Typeable
 import           Formatting (bprint, build, (%))
+import qualified Formatting.Buildable
+import           Generics.SOP.TH (deriveGeneric)
 import           GHC.Generics (Generic)
+import           Servant (err400)
 import           Servant.API.ContentTypes (Accept (..), JSON, MimeRender (..),
                      MimeUnrender (..), OctetStream)
 import           Test.QuickCheck
 
-import           Cardano.Wallet.API.Indices (Indexable', IxSet')
+import           Cardano.Wallet.API.Indices (Indexable, IxSet)
 import           Cardano.Wallet.API.Request (RequestParams (..))
 import           Cardano.Wallet.API.Request.Filter (FilterOperations (..))
 import           Cardano.Wallet.API.Request.Pagination (Page (..),
@@ -42,14 +48,13 @@ import           Cardano.Wallet.API.Request.Pagination (Page (..),
                      PerPage (..))
 import           Cardano.Wallet.API.Request.Sort (SortOperations (..))
 import           Cardano.Wallet.API.Response.Filter.IxSet as FilterBackend
+import           Cardano.Wallet.API.Response.JSend (HasDiagnostic (..),
+                     ResponseStatus (..))
 import           Cardano.Wallet.API.Response.Sort.IxSet as SortBackend
-import           Cardano.Wallet.API.V1.Errors
-                     (WalletError (JSONValidationFailed))
-
-import qualified Data.Aeson.Options as Serokell
-import qualified Data.Char as Char
-import qualified Formatting.Buildable
-
+import           Cardano.Wallet.API.V1.Errors (ToServantError (..))
+import           Cardano.Wallet.API.V1.Generic (jsendErrorGenericParseJSON,
+                     jsendErrorGenericToJSON)
+import           Cardano.Wallet.API.V1.Swagger.Example (Example, example)
 
 -- | Extra information associated with an HTTP response.
 data Metadata = Metadata
@@ -155,18 +160,18 @@ instance Example a => Example (WalletResponse a) where
 -- lazyness to avoid work. This might not be optimal in terms of performances and we might need to swap sorting
 -- and pagination.
 --
-respondWith :: (Monad m, Indexable' a)
+respondWith :: (Monad m, Indexable a)
             => RequestParams
-            -> FilterOperations a
+            -> FilterOperations ixs a
             -- ^ Filtering operations to perform on the data.
             -> SortOperations a
             -- ^ Sorting operations to perform on the data.
-            -> m (IxSet' a)
+            -> m (IxSet a)
             -- ^ The monadic action which produces the results.
             -> m (WalletResponse [a])
 respondWith RequestParams{..} fops sorts generator = do
     (theData, paginationMetadata) <- paginate rpPaginationParams . sortData sorts . applyFilters fops <$> generator
-    return $ WalletResponse {
+    return WalletResponse {
              wrData = theData
            , wrStatus = SuccessStatus
            , wrMeta = Metadata paginationMetadata
@@ -225,3 +230,40 @@ instance Accept ValidJSON where
 
 instance ToJSON a => MimeRender ValidJSON a where
     mimeRender _ = mimeRender (Proxy @ JSON)
+
+
+--
+-- Error from parsing / validating JSON inputs
+--
+
+newtype JSONValidationError
+    = JSONValidationFailed Text
+    deriving (Eq, Show, Generic)
+
+deriveGeneric ''JSONValidationError
+
+instance ToJSON JSONValidationError where
+    toJSON =
+        jsendErrorGenericToJSON
+
+instance FromJSON JSONValidationError where
+    parseJSON =
+        jsendErrorGenericParseJSON
+
+instance Exception JSONValidationError
+
+instance Arbitrary JSONValidationError where
+    arbitrary =
+        pure (JSONValidationFailed "JSON validation failed.")
+
+instance Buildable JSONValidationError where
+    build _ =
+        bprint "Couldn't decode a JSON input."
+
+instance HasDiagnostic JSONValidationError where
+    getDiagnosticKey _ =
+        "validationError"
+
+instance ToServantError JSONValidationError where
+    declareServantError _ =
+        err400

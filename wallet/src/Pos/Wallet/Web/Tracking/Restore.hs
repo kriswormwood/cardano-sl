@@ -5,17 +5,18 @@ import           Universum
 import           UnliftIO (MonadUnliftIO)
 
 import qualified Data.Map as M
-import           System.Wlog (WithLogger, logInfo, modifyLoggerName)
 
 import           Pos.Chain.Block (headerHash)
-import           Pos.Chain.Txp (genesisUtxo, unGenesisUtxo, utxoToModifier)
-import           Pos.Core (Address, HasConfiguration, HasDifficulty (..))
+import           Pos.Chain.Txp (genesisUtxo, utxoToModifier)
+import           Pos.Core as Core (Address, Config (..), HasDifficulty (..))
+import           Pos.Core.Genesis (GenesisData)
 import           Pos.Core.Txp (TxIn, TxOut (..), TxOutAux (..))
 import qualified Pos.DB.BlockIndex as DB
 import           Pos.DB.Class (MonadDBRead (..))
 import           Pos.DB.Txp.Utxo (filterUtxo)
 import           Pos.Infra.Slotting (MonadSlotsData)
 import           Pos.Util (HasLens (..))
+import           Pos.Util.Wlog (WithLogger, logInfo, modifyLoggerName)
 
 import           Pos.Wallet.Web.State (WalletDB, WalletDbReader, askWalletDB,
                      setWalletRestorationSyncTip, updateWalletBalancesAndUtxo)
@@ -36,17 +37,17 @@ restoreWallet :: ( WalletDbReader ctx m
                  , HasLens SyncQueue ctx SyncQueue
                  , MonadSlotsData ctx m
                  , MonadUnliftIO m
-                 ) => WalletDecrCredentials -> m ()
-restoreWallet credentials = do
+                 ) => Core.Config -> WalletDecrCredentials -> m ()
+restoreWallet coreConfig credentials = do
     db <- askWalletDB
     let (_, walletId) = credentials
     modifyLoggerName (const "syncWalletWorker") $ do
         logInfo "New Restoration request for a wallet..."
-        genesisBlockHeaderE <- firstGenesisHeader
+        genesisBlockHeaderE <- firstGenesisHeader $ configGenesisHash coreConfig
         case genesisBlockHeaderE of
             Left syncError -> processSyncError syncError
             Right genesisBlock -> do
-                restoreGenesisAddresses db credentials
+                restoreGenesisAddresses (configGenesisData coreConfig) db credentials
                 restoreWalletBalance db credentials
                 -- At this point, we consider ourselves synced with the UTXO up-to the
                 -- 'RestorationBlockDepth' we compute now. During 'syncWalletWithBlockchain',
@@ -97,10 +98,11 @@ restoreWalletBalance db credentials = do
 -- NOTE: This doesn't have any effect on the balance as if these addresses still have
 -- coins on them, this will be captured by the call to 'restoreWalletBalance', but yet
 -- we want to add them to the pool of known addresses for history-rebuilding purposes.
-restoreGenesisAddresses :: (HasConfiguration, MonadIO m) => WalletDB -> WalletDecrCredentials -> m ()
-restoreGenesisAddresses db credentials =
+restoreGenesisAddresses
+    :: MonadIO m => GenesisData -> WalletDB -> WalletDecrCredentials -> m ()
+restoreGenesisAddresses genesisData db credentials =
     let ownGenesisData =
             selectOwnAddresses credentials (txOutAddress . toaOut . snd) $
-            M.toList $ unGenesisUtxo genesisUtxo
+            M.toList $ genesisUtxo genesisData
         ownGenesisAddrs = map snd ownGenesisData
     in mapM_ (WS.addWAddress db) ownGenesisAddrs

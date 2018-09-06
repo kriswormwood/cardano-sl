@@ -12,14 +12,12 @@ import           Hedgehog (MonadGen, Property, PropertyT, checkSequential,
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
 import           System.FilePath ((</>))
-import           System.IO (hClose)
 import           System.IO.Temp (withSystemTempDirectory)
 
 import           Pos.Core (LocalSlotIndex (..), SlotCount (..),
                      localSlotIndices)
 import           Pos.DB.Epoch.Index
 
-import           Test.Pos.Core.Gen (genSlotCount)
 
 prop_smallLookups :: Property
 prop_smallLookups = property $ lookupProperty 100
@@ -54,7 +52,7 @@ lookupProperty epochSlots = do
         withSystemTempDirectory "index-test" $ \ dirPath -> do
             let indexPath = dirPath </> "test.index"
             writeEpochIndex epochSlots indexPath index
-            traverse (getEpochBlockOffset indexPath)
+            traverse (getEpochBlundOffset indexPath)
                     $ localSlotIndices epochSlots
 
     -- Compare the original set of offsets to the fetched ones

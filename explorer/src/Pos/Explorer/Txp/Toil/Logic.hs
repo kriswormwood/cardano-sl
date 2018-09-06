@@ -1,4 +1,5 @@
-{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE TypeFamilies    #-}
 
 -- | Explorer's version of Toil logic.
 
@@ -17,15 +18,15 @@ import qualified Data.HashSet as HS
 import           Data.List (delete)
 import qualified Data.List.NonEmpty as NE
 import           Formatting (build, sformat, (%))
-import           System.Wlog (logError)
 
 import           Pos.Chain.Block (HeaderHash)
 import           Pos.Chain.Txp (ToilVerFailure (..), TxpConfiguration,
                      extendGlobalToilM, extendLocalToilM, topsortTxs)
 import qualified Pos.Chain.Txp as Txp
-import           Pos.Core (Address, Coin, EpochIndex, HasConfiguration,
-                     Timestamp, mkCoin, sumCoins, unsafeAddCoin, unsafeSubCoin)
+import           Pos.Core (Address, Coin, EpochIndex, Timestamp, mkCoin,
+                     sumCoins, unsafeAddCoin, unsafeSubCoin)
 import           Pos.Core.Chrono (NewestFirst (..))
+import           Pos.Core.Genesis (GenesisWStakeholders)
 import           Pos.Core.Txp (Tx (..), TxAux (..), TxId, TxOut (..),
                      TxOutAux (..), TxUndo, _TxOut)
 import           Pos.Core.Update (BlockVersionData)
@@ -37,6 +38,7 @@ import           Pos.Explorer.Txp.Toil.Monad (EGlobalToilM, ELocalToilM,
                      getAddrBalance, getAddrHistory, getTxExtra, getUtxoSum,
                      putAddrBalance, putTxExtra, putUtxoSum, updateAddrHistory)
 import           Pos.Util.Util (Sign (..))
+import           Pos.Util.Wlog (logError)
 
 ----------------------------------------------------------------------------
 -- Global
@@ -44,14 +46,14 @@ import           Pos.Util.Util (Sign (..))
 
 -- | Apply transactions from one block. They must be valid (for
 -- example, it implies topological sort).
-eApplyToil ::
-       HasConfiguration
-    => Maybe Timestamp
+eApplyToil
+    :: GenesisWStakeholders
+    -> Maybe Timestamp
     -> [(TxAux, TxUndo)]
     -> HeaderHash
     -> EGlobalToilM ()
-eApplyToil mTxTimestamp txun hh = do
-    extendGlobalToilM $ Txp.applyToil txun
+eApplyToil bootStakeholders mTxTimestamp txun hh = do
+    extendGlobalToilM $ Txp.applyToil bootStakeholders txun
     explorerExtraMToEGlobalToilM $ mapM_ applier $ zip [0..] txun
   where
     applier :: (Word32, (TxAux, TxUndo)) -> ExplorerExtraM ()
@@ -66,9 +68,9 @@ eApplyToil mTxTimestamp txun hh = do
         updateUtxoSumFromBalanceUpdate balanceUpdate
 
 -- | Rollback transactions from one block.
-eRollbackToil :: HasConfiguration => [(TxAux, TxUndo)] -> EGlobalToilM ()
-eRollbackToil txun = do
-    extendGlobalToilM $ Txp.rollbackToil txun
+eRollbackToil :: GenesisWStakeholders -> [(TxAux, TxUndo)] -> EGlobalToilM ()
+eRollbackToil bootStakeholders txun = do
+    extendGlobalToilM $ Txp.rollbackToil bootStakeholders txun
     explorerExtraMToEGlobalToilM $ mapM_ extraRollback $ reverse txun
   where
     extraRollback :: (TxAux, TxUndo) -> ExplorerExtraM ()

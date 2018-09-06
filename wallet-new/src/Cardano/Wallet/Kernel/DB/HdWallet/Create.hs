@@ -25,11 +25,9 @@ import           Formatting (bprint, build, sformat, (%))
 import qualified Formatting.Buildable
 
 import qualified Pos.Core as Core
-import           Pos.Core.Chrono
 
 import           Cardano.Wallet.Kernel.DB.HdWallet
 import           Cardano.Wallet.Kernel.DB.InDb
-import           Cardano.Wallet.Kernel.DB.Spec
 import           Cardano.Wallet.Kernel.DB.Util.AcidState
 import           Cardano.Wallet.Kernel.DB.Util.IxSet (AutoIncrementKey (..),
                      Indexed (..))
@@ -70,7 +68,7 @@ deriveSafeCopy 1 'base ''CreateHdAddressError
 -------------------------------------------------------------------------------}
 
 -- | Create a new wallet
-createHdRoot :: HdRoot -> Update' HdWallets CreateHdRootError ()
+createHdRoot :: HdRoot -> Update' CreateHdRootError HdWallets ()
 createHdRoot hdRoot =
     zoom hdWalletsRoots $ do
       exists <- gets $ IxSet.member rootId
@@ -80,7 +78,7 @@ createHdRoot hdRoot =
     rootId = hdRoot ^. hdRootId
 
 -- | Create a new account
-createHdAccount :: HdAccount -> Update' HdWallets CreateHdAccountError ()
+createHdAccount :: HdAccount -> Update' CreateHdAccountError HdWallets ()
 createHdAccount hdAccount = do
     -- Check that the root ID exists
     zoomHdRootId CreateHdAccountUnknownRoot rootId $
@@ -95,7 +93,7 @@ createHdAccount hdAccount = do
     rootId    = accountId ^. hdAccountIdParent
 
 -- | Create a new address
-createHdAddress :: HdAddress -> Update' HdWallets CreateHdAddressError ()
+createHdAddress :: HdAddress -> Update' CreateHdAddressError HdWallets ()
 createHdAddress hdAddress = do
     -- Check that the account ID exists
     currentPkCounter <-
@@ -149,15 +147,12 @@ initHdRoot rootId name hasPass assurance created = HdRoot {
 -- It is the responsibility of the caller to check the wallet's spending
 -- password.
 initHdAccount :: HdAccountId
-              -> Checkpoint
+              -> HdAccountState
               -> HdAccount
-initHdAccount accountId checkpoint = HdAccount {
+initHdAccount accountId st = HdAccount {
       _hdAccountId    = accountId
     , _hdAccountName  = defName
-    , _hdAccountState = HdAccountStateUpToDate
-                      $ HdAccountUpToDate
-                      $ NewestFirst
-                      $ checkpoint :| []
+    , _hdAccountState = st
     , _hdAccountAutoPkCounter = AutoIncrementKey 0
     }
   where
@@ -174,11 +169,11 @@ initHdAccount accountId checkpoint = HdAccount {
 -- Similarly, it will be the responsibility of the caller to pick a random
 -- address index, as we do not have access to a random number generator here.
 initHdAddress :: HdAddressId
-              -> InDb Core.Address
+              -> Core.Address
               -> HdAddress
 initHdAddress addrId address = HdAddress {
       _hdAddressId      = addrId
-    , _hdAddressAddress = address
+    , _hdAddressAddress = InDb address
     }
 
 {-------------------------------------------------------------------------------

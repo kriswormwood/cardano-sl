@@ -1,5 +1,6 @@
-{-# LANGUAGE CPP        #-}
-{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE CPP             #-}
+{-# LANGUAGE RankNTypes      #-}
+{-# LANGUAGE RecordWildCards #-}
 
 -- | High-level scenarios which can be launched.
 
@@ -14,17 +15,18 @@ import           Universum
 import qualified Data.HashMap.Strict as HM
 import           Formatting (bprint, build, int, sformat, shown, (%))
 import           Serokell.Util (listJson)
-import           System.Wlog (WithLogger, askLoggerName, logInfo)
 
 import           Pos.Chain.Txp (TxpConfiguration, bootDustThreshold)
 import           Pos.Chain.Update (HasUpdateConfiguration, curSoftwareVersion,
                      lastKnownBlockVersion, ourSystemTag)
 import           Pos.Context (getOurPublicKey)
-import           Pos.Core (addressHash, genesisData)
+import           Pos.Core as Core (Config (..), addressHash,
+                     configBootStakeholders, configFtsSeed,
+                     configHeavyDelegation)
 import           Pos.Core.Conc (mapConcurrently)
-import           Pos.Core.Genesis (GenesisData (..), GenesisDelegation (..),
-                     GenesisWStakeholders (..), gdFtsSeed)
-import           Pos.Crypto (ProtocolMagic, pskDelegatePk)
+import           Pos.Core.Genesis (GenesisDelegation (..),
+                     GenesisWStakeholders (..))
+import           Pos.Crypto (pskDelegatePk)
 import qualified Pos.DB.BlockIndex as DB
 import qualified Pos.GState as GS
 import           Pos.Infra.Diffusion.Types (Diffusion)
@@ -34,6 +36,7 @@ import           Pos.Infra.Util.LogSafe (logInfoS)
 import           Pos.Launcher.Resource (NodeResources (..))
 import           Pos.Util.AssertMode (inAssertMode)
 import           Pos.Util.CompileInfo (HasCompileInfo, compileInfo)
+import           Pos.Util.Wlog (WithLogger, askLoggerName, logInfo)
 import           Pos.Worker (allWorkers)
 import           Pos.WorkMode.Class (WorkMode)
 
@@ -44,11 +47,12 @@ runNode'
        ( HasCompileInfo
        , WorkMode ctx m
        )
-    => NodeResources ext
+    => Core.Config
+    -> NodeResources ext
     -> [Diffusion m -> m ()]
     -> [Diffusion m -> m ()]
     -> Diffusion m -> m ()
-runNode' NodeResources {..} workers' plugins' = \diffusion -> do
+runNode' coreConfig NodeResources {..} workers' plugins' = \diffusion -> do
     logInfo $ "Built with: " <> pretty compileInfo
     nodeStartMsg
     inAssertMode $ logInfo "Assert mode on"
@@ -57,14 +61,14 @@ runNode' NodeResources {..} workers' plugins' = \diffusion -> do
     logInfoS $ sformat ("My public key is: "%build%", pk hash: "%build)
         pk pkHash
 
-    let genesisStakeholders = gdBootStakeholders genesisData
+    let genesisStakeholders = configBootStakeholders coreConfig
     logInfo $ sformat
         ("Genesis stakeholders ("%int%" addresses, dust threshold "%build%"): "%build)
         (length $ getGenesisWStakeholders genesisStakeholders)
         (bootDustThreshold genesisStakeholders)
         genesisStakeholders
 
-    let genesisDelegation = gdHeavyDelegation genesisData
+    let genesisDelegation = configHeavyDelegation coreConfig
     let formatDlgPair (issuerId, delegateId) =
             bprint (build%" -> "%build) issuerId delegateId
     logInfo $ sformat ("GenesisDelegation (stakeholder ids): "%listJson)
@@ -72,11 +76,12 @@ runNode' NodeResources {..} workers' plugins' = \diffusion -> do
             $ HM.toList
             $ unGenesisDelegation genesisDelegation
 
-    firstGenesisHash <- GS.getFirstGenesisBlockHash
+    firstGenesisHash <- GS.getFirstGenesisBlockHash $ configGenesisHash
+        coreConfig
     logInfo $ sformat
         ("First genesis block hash: "%build%", genesis seed is "%build)
         firstGenesisHash
-        (gdFtsSeed genesisData)
+        (configFtsSeed coreConfig)
 
     tipHeader <- DB.getTipHeader
     logInfo $ sformat ("Current tip header: "%build) tipHeader
@@ -106,14 +111,14 @@ runNode
     :: ( HasCompileInfo
        , WorkMode ctx m
        )
-    => ProtocolMagic
+    => Core.Config
     -> TxpConfiguration
     -> NodeResources ext
     -> [Diffusion m -> m ()]
     -> Diffusion m -> m ()
-runNode pm txpConfig nr plugins = runNode' nr workers' plugins
-  where
-    workers' = allWorkers pm txpConfig nr
+runNode coreConfig txpConfig nr plugins =
+    runNode' coreConfig nr workers' plugins
+    where workers' = allWorkers coreConfig txpConfig nr
 
 -- | This function prints a very useful message when node is started.
 nodeStartMsg :: (HasUpdateConfiguration, WithLogger m) => m ()

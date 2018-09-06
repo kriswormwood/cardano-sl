@@ -5,8 +5,6 @@ module WalletSpecs (walletSpecs) where
 
 import           Universum
 
-import           Cardano.Wallet.API.V1.Errors
-                     (WalletError (WalletAlreadyExists))
 import           Cardano.Wallet.Client.Http
 import           Control.Lens
 import           Test.Hspec
@@ -15,7 +13,7 @@ import           Util
 
 
 walletSpecs :: WalletRef -> WalletClient IO -> Spec
-walletSpecs _ wc = do
+walletSpecs _ wc =
     describe "Wallets" $ do
         it "Creating a wallet makes it available." $ do
             newWallet <- randomWallet CreateWallet
@@ -53,6 +51,15 @@ walletSpecs _ wc = do
                 }
 
             eresp `shouldPrism_` _Right
+
+        it "creating wallet gives rise to an empty Utxo histogram" $ do
+            newWallet <- randomWallet CreateWallet
+            wallet <- createWalletCheck wc newWallet
+
+            eresp <- getUtxoStatistics wc (walId wallet)
+            utxoStatistics <- fmap wrData eresp `shouldPrism` _Right
+            let utxoStatisticsExpected = computeUtxoStatistics log10 []
+            utxoStatistics `shouldBe` utxoStatisticsExpected
   where
     testWalletAlreadyExists action = do
             newWallet1 <- randomWallet action
@@ -63,8 +70,10 @@ walletSpecs _ wc = do
                         }
             -- First wallet creation/restoration should succeed
             result <- postWallet wc newWallet1
-            void $ result `shouldPrism` _Right
+            wallet <- fmap wrData (result `shouldPrism` _Right)
             -- Second wallet creation/restoration should rise WalletAlreadyExists
             eresp <- postWallet wc newWallet2
             clientError <- eresp `shouldPrism` _Left
-            clientError `shouldBe` ClientWalletError WalletAlreadyExists
+            clientError
+                `shouldBe`
+                    ClientWalletError (WalletAlreadyExists (walId wallet))

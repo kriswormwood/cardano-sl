@@ -21,7 +21,6 @@ import qualified Data.HashMap.Strict as HM
 import qualified Data.HashSet as HS
 import           Formatting (build, ords, sformat, (%))
 import qualified System.Metrics.Counter as Metrics
-import           System.Wlog (logDebug, logInfo, logWarning)
 import           UnliftIO (MonadUnliftIO)
 
 import           Pos.Chain.Lrc (LrcError (..), RichmenStakes,
@@ -29,16 +28,16 @@ import           Pos.Chain.Lrc (LrcError (..), RichmenStakes,
                      followTheSatoshiM)
 import           Pos.Chain.Ssc (MonadSscMem, noReportNoSecretsForEpoch1)
 import           Pos.Chain.Update (BlockVersionState (..))
-import           Pos.Core (Coin, EpochIndex, EpochOrSlot (..), SharedSeed,
-                     StakeholderId, blkSecurityParam, crucialSlot, epochIndexL,
-                     epochSlots, getEpochOrSlot)
+import           Pos.Core as Core (Coin, Config (..), EpochIndex,
+                     EpochOrSlot (..), SharedSeed, SlotCount, StakeholderId,
+                     configBlkSecurityParam, configEpochSlots, configK,
+                     crucialSlot, epochIndexL, getEpochOrSlot)
 import           Pos.Core.Chrono (NE, NewestFirst (..), toOldestFirst)
 import           Pos.Core.Conc (forConcurrently)
 import           Pos.Core.Reporting (HasMisbehaviorMetrics (..),
                      MisbehaviorMetrics (..))
 import           Pos.Core.Slotting (MonadSlots)
 import           Pos.Core.Util.TimeLimit (logWarningWaitLinear)
-import           Pos.Crypto (ProtocolMagic)
 import qualified Pos.DB.Block.GState.SanityCheck as DB (sanityCheckDB)
 import qualified Pos.DB.Block.Load as DB
 import           Pos.DB.Block.Logic.Internal (BypassSecurityCheck (..),
@@ -53,9 +52,10 @@ import           Pos.DB.Lrc (IssuersStakes, LrcConsumer (..), LrcContext (..),
 import qualified Pos.DB.Lrc as LrcDB (hasLeaders, putLeadersForEpoch)
 import           Pos.DB.Ssc (sscCalculateSeed)
 import qualified Pos.DB.Txp.Stakes as GS
-import           Pos.DB.Update (getAdoptedBVFull, getCompetingBVStates)
+import           Pos.DB.Update (getCompetingBVStates)
 import           Pos.Util (maybeThrow)
 import           Pos.Util.Util (HasLens (..))
+import           Pos.Util.Wlog (logDebug, logInfo, logWarning)
 
 
 ----------------------------------------------------------------------------
@@ -77,10 +77,10 @@ type LrcModeFull ctx m =
 lrcSingleShot
     :: forall ctx m
      . (LrcModeFull ctx m, HasMisbehaviorMetrics ctx)
-    => ProtocolMagic
+    => Core.Config
     -> EpochIndex
     -> m ()
-lrcSingleShot pm epoch = do
+lrcSingleShot coreConfig epoch = do
     lock <- views (lensOf @LrcContext) lcLrcSync
     logDebug $ sformat
         ("lrcSingleShot is trying to acquire LRC lock, the epoch is "
@@ -106,7 +106,7 @@ lrcSingleShot pm epoch = do
                     , expectedRichmenComp)
         when need $ do
             logInfo "LRC is starting actual computation"
-            lrcDo pm epoch filteredConsumers
+            lrcDo coreConfig epoch filteredConsumers
             logInfo "LRC has finished actual computation"
         putEpoch epoch
         logInfo ("LRC has updated LRC DB" <> for_thEpochMsg)
@@ -134,12 +134,12 @@ lrcDo
      . ( LrcModeFull ctx m
        , HasMisbehaviorMetrics ctx
        )
-    => ProtocolMagic
+    => Core.Config
     -> EpochIndex
     -> [LrcConsumer m]
     -> m ()
-lrcDo pm epoch consumers = do
-    blundsUpToGenesis <- DB.loadBlundsFromTipWhile upToGenesis
+lrcDo coreConfig epoch consumers = do
+    blundsUpToGenesis <- DB.loadBlundsFromTipWhile genesisHash upToGenesis
     -- If there are blocks from 'epoch' it means that we somehow accepted them
     -- before running LRC for 'epoch'. It's very bad.
     unless (null blundsUpToGenesis) $ throwM LrcAfterGenesis
@@ -150,7 +150,7 @@ lrcDo pm epoch consumers = do
     -- However, it's important to check that there are blocks to
     -- rollback before computing ssc seed (because if there are no
     -- blocks, it doesn't make sense to do it).
-    blundsToRollback <- DB.loadBlundsFromTipWhile whileAfterCrucial
+    blundsToRollback <- DB.loadBlundsFromTipWhile genesisHash whileAfterCrucial
     blundsToRollbackNE <-
         maybeThrow UnknownBlocksForLrc (atLeastKNewestFirst blundsToRollback)
     seed <- sscCalculateSeed epoch >>= \case
@@ -171,21 +171,22 @@ lrcDo pm epoch consumers = do
     withBlocksRolledBack blundsToRollbackNE $ do
         issuersComputationDo epoch
         richmenComputationDo epoch consumers
-        DB.sanityCheckDB
-        leadersComputationDo epoch seed
+        DB.sanityCheckDB $ configGenesisData coreConfig
+        leadersComputationDo (configEpochSlots coreConfig) epoch seed
   where
+    genesisHash = configGenesisHash coreConfig
     atLeastKNewestFirst :: forall a. NewestFirst [] a -> Maybe (NewestFirst NE a)
     atLeastKNewestFirst l =
-        if length l >= fromIntegral blkSecurityParam
+        if length l >= configK coreConfig
         then coerce (nonEmpty @a) l
         else Nothing
 
-    applyBack blunds = do
-        (bv, bvd) <- getAdoptedBVFull
-        applyBlocksUnsafe pm bv bvd scb blunds Nothing
+    applyBack blunds = applyBlocksUnsafe coreConfig scb blunds Nothing
     upToGenesis b = b ^. epochIndexL >= epoch
     whileAfterCrucial b = getEpochOrSlot b > crucial
-    crucial = EpochOrSlot $ Right $ crucialSlot epoch
+    crucial = EpochOrSlot $ Right $ crucialSlot
+        (configBlkSecurityParam coreConfig)
+        epoch
     bsc =
         -- LRC rollbacks temporarily to examine the state of the DB at the
         -- time of the crucial slot. The crucial slot may be further than 'blkSecurityParam'
@@ -197,7 +198,7 @@ lrcDo pm epoch consumers = do
         -- and outer viewers mustn't know about it.
         ShouldCallBListener False
     withBlocksRolledBack blunds =
-        bracket_ (rollbackBlocksUnsafe pm bsc scb blunds)
+        bracket_ (rollbackBlocksUnsafe coreConfig bsc scb blunds)
                  (applyBack (toOldestFirst blunds))
 
 issuersComputationDo :: forall ctx m . LrcMode ctx m => EpochIndex -> m ()
@@ -216,15 +217,16 @@ issuersComputationDo epochId = do
         Just stake -> pure $ HM.insert id stake hm
 
 leadersComputationDo :: LrcMode ctx m
-    => EpochIndex
+    => SlotCount
+    -> EpochIndex
     -> SharedSeed
     -> m ()
-leadersComputationDo epochId seed =
+leadersComputationDo epochSlots epochId seed =
     unlessM (LrcDB.hasLeaders epochId) $ do
         totalStake <- GS.getRealTotalStake
         leaders <-
             runConduitRes $ GS.stakeSource .| followTheSatoshiM epochSlots seed totalStake
-        LrcDB.putLeadersForEpoch epochId leaders
+        LrcDB.putLeadersForEpoch epochSlots epochId leaders
 
 --------------------------------------------------------------------------------
 -- Richmen

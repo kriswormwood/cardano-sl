@@ -8,6 +8,7 @@ module UTxO.Verify
     , verify
 
     -- * Specific verification functions
+    , VerifyBlockFailure(..)
     , verifyBlocksPrefix
     ) where
 
@@ -19,14 +20,18 @@ import           Control.Monad.State.Strict (mapStateT)
 import           Data.Default (def)
 import qualified Data.HashSet as HS
 import qualified Data.List.NonEmpty as NE
-import           System.Wlog
+import           Formatting (bprint, build, (%))
+import qualified Formatting.Buildable
+import           Serokell.Util (listJson)
 
+import           Pos.Binary.Class (biSize)
 import           Pos.Chain.Block
 import           Pos.Chain.Delegation (DlgUndo (..))
 import           Pos.Chain.Txp
 import           Pos.Chain.Update
 import           Pos.Core
 import           Pos.Core.Chrono
+import           Pos.Core.Genesis (GenesisData (..))
 import           Pos.Core.Update (BlockVersionData)
 import           Pos.DB.Block (toTxpBlock)
 import           Pos.DB.Class (MonadGState (..))
@@ -34,7 +39,12 @@ import           Pos.DB.Txp (TxpBlock)
 import           Pos.Util (neZipWith4)
 import           Pos.Util.Lens
 import qualified Pos.Util.Modifier as MM
+import           Pos.Util.Wlog
 import           Serokell.Util.Verify
+
+import           Test.Pos.Core.Dummy (dummyConfig, dummyEpochSlots,
+                     dummyGenesisData, dummyK)
+import           Test.Pos.Crypto.Dummy (dummyProtocolMagic)
 
 {-------------------------------------------------------------------------------
   Verification environment
@@ -55,18 +65,18 @@ data VerifyEnv = UnsafeVerifyEnv {
     , venvLoggerName       :: LoggerName
     }
 
-verifyEnv' :: HasGenesisData
-           => Utxo
+verifyEnv' :: Utxo
            -> BlockVersionData
            -> LoggerName
            -> VerifyEnv
 verifyEnv' utxo bvd lname = UnsafeVerifyEnv {
-      venvInitUtxo         =                     utxo
-    , venvInitStakes       = utxoToStakes        utxo
+      venvInitUtxo         = utxo
+    , venvInitStakes       = utxoToStakes bootStakeholders utxo
     , venvInitTotal        = getTotalCoinsInUtxo utxo
     , venvBlockVersionData = bvd
     , venvLoggerName       = lname
     }
+  where bootStakeholders = gdBootStakeholders dummyGenesisData
 
 verifyEnv :: HasConfiguration => Utxo -> VerifyEnv
 verifyEnv utxo =
@@ -222,15 +232,13 @@ mapVerifyErrors f (Verify ma) = Verify $ mapStateT (withExceptT f) ma
 -- corresponding functions from the Cardano core. This didn't look very easy
 -- so I skipped it for now.
 verifyBlocksPrefix
-    :: HasConfiguration
-    => ProtocolMagic
-    -> HeaderHash    -- ^ Expected tip
+    :: HeaderHash    -- ^ Expected tip
     -> Maybe SlotId  -- ^ Current slot
     -> SlotLeaders   -- ^ Slot leaders for this epoch
     -> LastBlkSlots  -- ^ Last block slots
     -> OldestFirst NE Block
     -> Verify VerifyBlocksException (OldestFirst NE Undo)
-verifyBlocksPrefix pm tip curSlot leaders lastSlots blocks = do
+verifyBlocksPrefix tip curSlot leaders lastSlots blocks = do
     when (tip /= blocks ^. _Wrapped . _neHead . prevBlockL) $
         throwError $ VerifyBlocksError "the first block isn't based on the tip"
 
@@ -238,7 +246,7 @@ verifyBlocksPrefix pm tip curSlot leaders lastSlots blocks = do
 
     -- Verify block envelope
     slogUndos <- mapVerifyErrors VerifyBlocksError $
-                   slogVerifyBlocks pm curSlot leaders lastSlots blocks
+                   slogVerifyBlocks curSlot leaders lastSlots blocks
 
     -- We skip SSC verification
     {-
@@ -248,7 +256,7 @@ verifyBlocksPrefix pm tip curSlot leaders lastSlots blocks = do
 
     -- Verify transactions
     txUndo <- mapVerifyErrors (VerifyBlocksError . pretty) $
-        tgsVerifyBlocks pm $ map toTxpBlock blocks
+        tgsVerifyBlocks $ map toTxpBlock blocks
 
     -- Skip delegation verification
     {-
@@ -292,14 +300,12 @@ verifyBlocksPrefix pm tip curSlot leaders lastSlots blocks = do
 -- * Uses 'gsAdoptedBVData' instead of 'getAdoptedBVFull'
 -- * Use hard-coded 'dataMustBeKnown' (instead of deriving this from 'adoptedBV')
 slogVerifyBlocks
-    :: HasConfiguration
-    => ProtocolMagic
-    -> Maybe SlotId  -- ^ Current slot
+    :: Maybe SlotId  -- ^ Current slot
     -> SlotLeaders   -- ^ Slot leaders for this epoch
     -> LastBlkSlots  -- ^ Last block slots
     -> OldestFirst NE Block
     -> Verify Text (OldestFirst NE SlogUndo)
-slogVerifyBlocks pm curSlot leaders lastSlots blocks = do
+slogVerifyBlocks curSlot leaders lastSlots blocks = do
     adoptedBVD <- gsAdoptedBVData
 
     -- We take head here, because blocks are in oldest first order and
@@ -312,12 +318,12 @@ slogVerifyBlocks pm curSlot leaders lastSlots blocks = do
         _ -> pass
     let blocksList = OldestFirst (toList (getOldestFirst blocks))
     verResToMonadError formatAllErrors $
-        verifyBlocks pm curSlot dataMustBeKnown adoptedBVD leaders blocksList
+        verifyBlocks dummyConfig curSlot dataMustBeKnown adoptedBVD leaders blocksList
 
     -- Here we need to compute 'SlogUndo'. When we add apply a block,
     -- we can remove one of the last slots stored in
     -- 'BlockExtra'. This removed slot must be put into 'SlogUndo'.
-    let toFlatSlot = fmap (flattenSlotId . view mainBlockSlot) . rightToMaybe
+    let toFlatSlot = fmap (flattenSlotId dummyEpochSlots . view mainBlockSlot) . rightToMaybe
     -- these slots will be added if we apply all blocks
     let newSlots = mapMaybe toFlatSlot (toList blocks)
     let combinedSlots :: OldestFirst [] FlatSlotId
@@ -327,7 +333,7 @@ slogVerifyBlocks pm curSlot leaders lastSlots blocks = do
     let removedSlots :: OldestFirst [] FlatSlotId
         removedSlots =
             combinedSlots & _Wrapped %~
-            (take $ length combinedSlots - fromIntegral blkSecurityParam)
+            (take $ length combinedSlots - fromIntegral dummyK)
     -- Note: here we exploit the fact that genesis block can be only 'head'.
     -- If we have genesis block, then size of 'newSlots' will be less than
     -- number of blocks we verify. It means that there will definitely
@@ -351,22 +357,25 @@ slogVerifyBlocks pm curSlot leaders lastSlots blocks = do
 --
 -- * 'verifyAllIsKnown' hardcoded ('dataMustBeKnown')
 -- * Does everything in a pure monad.
+-- * We include teh transaction in the failure
 --   I don't fully grasp the consequences of this.
 tgsVerifyBlocks
-    :: ProtocolMagic
-    -> OldestFirst NE TxpBlock
-    -> Verify ToilVerFailure (OldestFirst NE TxpUndo)
-tgsVerifyBlocks pm newChain = do
+    :: OldestFirst NE TxpBlock
+    -> Verify VerifyBlockFailure (OldestFirst NE TxpUndo)
+tgsVerifyBlocks newChain = do
     bvd <- gsAdoptedBVData
     let epoch = NE.last (getOldestFirst newChain) ^. epochIndexL
-    let verifyPure :: [TxAux] -> Verify ToilVerFailure TxpUndo
-        verifyPure = nat . verifyToil pm bvd mempty epoch dataMustBeKnown
+    let verifyPure :: [TxAux] -> Verify VerifyBlockFailure TxpUndo
+        verifyPure txs = nat $
+          withExceptT (verifyBlockFailure txs) $
+            verifyToil dummyProtocolMagic bvd mempty epoch dataMustBeKnown txs
     mapM (verifyPure . convertPayload) newChain
   where
     convertPayload :: TxpBlock -> [TxAux]
     convertPayload (ComponentBlockMain _ payload) = flattenTxPayload payload
     convertPayload (ComponentBlockGenesis _)      = []
-    nat :: forall e a. ExceptT e UtxoM a -> Verify e a
+
+    nat :: ExceptT e UtxoM a -> Verify e a
     nat action =
         Verify $ do
             baseUtxo <- lift . lift $ venvInitUtxo <$> WithVerifyEnv ask
@@ -385,3 +394,40 @@ tgsVerifyBlocks pm newChain = do
 -- relevant here.
 dataMustBeKnown :: Bool
 dataMustBeKnown = True
+
+{-------------------------------------------------------------------------------
+  More detailed error messages
+-------------------------------------------------------------------------------}
+
+data VerifyBlockFailure =
+    -- | We record the original failure and we attempt to figure out which
+    -- transaction this belonged to. Since we can't be totally sure, this may
+    -- be empty (couldn't find any matches) or have more than one element
+    -- (it could have been more than one transaction that failed)
+    ToilVerFailure [TxAux] ToilVerFailure
+
+-- | Try to construct more detailed error message
+--
+-- The core code we call verifies an entire block at once, so we have to
+-- guess which transaction in the list it was that failed
+verifyBlockFailure :: [TxAux] -> ToilVerFailure -> VerifyBlockFailure
+verifyBlockFailure txs failure =
+    case failure of
+      ToilInsufficientFee _policy _fee _minFee sz ->
+        -- _minFee is determined entirely by sz: not useful for filtering
+        -- we cannot use _fee because a 'TxAux' does not give us enough
+        -- information to compute the actual fee (we need the resolved inputs)
+        let matching tx = biSize tx == sz
+        in ToilVerFailure (filter matching txs) failure
+      _otherwise ->
+        ToilVerFailure [] failure
+
+instance Buildable VerifyBlockFailure where
+    build (ToilVerFailure txs failure) = bprint
+        ( "ToilVerFailure "
+        % "{ matchingTxs: " % listJson
+        % ", failure:     " % build
+        % "}"
+        )
+        txs
+        failure

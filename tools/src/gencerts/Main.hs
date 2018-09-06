@@ -1,6 +1,7 @@
---
+{-# LANGUAGE RecordWildCards #-}
+
 -- | Generate X.509 Certificates for TLS Client/Server authentication
---
+
 module Main where
 
 import           Universum
@@ -111,7 +112,7 @@ genCertificate CertDescription{..} = do
     (priv,) <$> signCertificate certSigningKey cert
   where
     addDays :: Int -> DateTime -> DateTime
-    addDays n time@DateTime{..} =
+    addDays n time@(DateTime dtDate _) =
         time { dtDate = dateAddPeriod dtDate (mempty { periodDays = n }) }
 
     addMinutes :: Int -> DateTime -> DateTime

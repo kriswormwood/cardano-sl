@@ -23,7 +23,7 @@ with localLib;
 
 let
   stackExec = optionalString useStackBinaries "stack exec -- ";
-  cardanoDeps = with iohkPkgs; [ cardano-sl-tools cardano-sl-wallet-new cardano-sl-node-static ];
+  cardanoDeps = with iohkPkgs; [ cardano-sl-tools-static cardano-sl-wallet-new-static cardano-sl-node-static ];
   demoClusterDeps = with pkgs; [ jq coreutils curl gnused openssl ];
   allDeps =  demoClusterDeps ++ (optionals (!useStackBinaries ) cardanoDeps);
   walletConfig = {
@@ -142,8 +142,7 @@ in pkgs.writeScript "demo-cluster" ''
     SYNCED=0
     while [[ $SYNCED != 100 ]]
     do
-      PERC=$(curl --cacert ${stateDir}/tls/client/ca.crt --cert ${stateDir}/tls/client/client.pem https://${demoWallet.walletListen}/api/v1/node-info | jq .data.syncProgress.quantity)
-      echo "PERC=$PERC"
+      PERC=$(curl --silent --cacert ${stateDir}/tls/client/ca.crt --cert ${stateDir}/tls/client/client.pem https://${demoWallet.walletListen}/api/v1/node-info | jq .data.syncProgress.quantity)
       if [[ $PERC == "100" ]]
       then
         echo Blockchain Synced: $PERC%

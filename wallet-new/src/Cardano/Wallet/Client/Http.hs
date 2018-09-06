@@ -32,6 +32,7 @@ import           Servant ((:<|>) (..), (:>))
 import           Servant.Client (BaseUrl (..), ClientEnv (..), ClientM,
                      Scheme (..), ServantError (..), client, runClientM)
 
+import           Cardano.Wallet.API (WIPAPI)
 import qualified Cardano.Wallet.API.V1 as V1
 import           Cardano.Wallet.Client
 
@@ -105,6 +106,18 @@ mkHttpClient baseUrl manager = WalletClient
         = run . getWalletR
     , updateWallet
         = \x -> run . updateWalletR x
+    , getUtxoStatistics
+        = run . getUtxoStatisticsR
+    , postCheckExternalWallet
+        = run . postCheckExternalWalletR
+    , postExternalWallet
+        = run . postExternalWalletR
+    , deleteExternalWallet
+        = unNoContent . run . deleteExternalWalletR
+    , postUnsignedTransaction
+        = run . postUnsignedTransactionR
+    , postSignedTransaction
+        = run . postSignedTransactionR
     -- account endpoints
     , deleteAccount
         = \x -> unNoContent . run . deleteAccountR x
@@ -135,7 +148,7 @@ mkHttpClient baseUrl manager = WalletClient
         = run getNodeSettingsR
     -- info
     , getNodeInfo
-        = run getNodeInfoR
+        = run . getNodeInfoR
     }
 
   where
@@ -165,7 +178,15 @@ mkHttpClient baseUrl manager = WalletClient
         :<|> deleteWalletR
         :<|> getWalletR
         :<|> updateWalletR
+        :<|> getUtxoStatisticsR
         = walletsAPI
+
+    postCheckExternalWalletR
+        :<|> postExternalWalletR
+        :<|> deleteExternalWalletR
+        :<|> postUnsignedTransactionR
+        :<|> postSignedTransactionR
+        = client (Proxy @ WIPAPI)
 
     deleteAccountR
         :<|> getAccountR

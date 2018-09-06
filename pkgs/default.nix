@@ -489,8 +489,8 @@ license = stdenv.lib.licenses.bsd3;
 mkDerivation {
 
 pname = "Chart-diagrams";
-version = "1.8.2";
-sha256 = "ca181dec04bac1029101dd75951f48710ebc42f5333e06c57943e3245bba9f41";
+version = "1.8.3";
+sha256 = "beed1e3d4ef96be26921d058bc8d3510641514eb3c4539258e8ecf1efabc3adc";
 enableSeparateDataOutput = true;
 libraryHaskellDepends = [
 base
@@ -14544,8 +14544,8 @@ version = "1.1.0";
 src = fetchgit {
 
 url = "https://github.com/input-output-hk/cardano-crypto";
-sha256 = "1v165n4cmp4g272406vaaan7bwvrw2m55jwcbz8qqjxslxv1l63p";
-rev = "33c7ecc6e4bd71c3ea0195e9d796eeace7be22cf";
+sha256 = "0ax9gxbr3qnji1jwz2rz97573lkyi4128m2ck90bi1x15p4bm65y";
+rev = "e87fcd3fea18f664d6e4f39c11abb8cafbd25785";
 
 };
 isLibrary = true;
@@ -14722,8 +14722,9 @@ license = stdenv.lib.licenses.bsd3;
 , http-client
 , http-client-tls
 , http-conduit
+, http-types
 , lens
-, log-warper
+, lifted-async
 , memory
 , monad-control
 , mtl
@@ -14774,6 +14775,7 @@ version = "1.3.0";
 src = ./../lib;
 configureFlags = [
 "--ghc-option=-fwarn-redundant-constraints"
+"--ghc-option=-Wall"
 "--ghc-option=-Wcompat"
 "--ghc-option=-Werror"
 ];
@@ -14815,8 +14817,9 @@ hspec
 http-client
 http-client-tls
 http-conduit
+http-types
 lens
-log-warper
+lifted-async
 memory
 monad-control
 mtl
@@ -14891,7 +14894,6 @@ formatting
 generic-arbitrary
 hspec
 lens
-log-warper
 network-transport
 network-transport-inmemory
 pvss
@@ -14973,7 +14975,6 @@ license = stdenv.lib.licenses.mit;
 , hspec
 , lens
 , loc
-, log-warper
 , megaparsec
 , MonadRandom
 , mtl
@@ -15008,6 +15009,7 @@ version = "1.3.0";
 src = ./../auxx;
 configureFlags = [
 "--ghc-option=-fwarn-redundant-constraints"
+"--ghc-option=-Wall"
 "--ghc-option=-Wcompat"
 "--ghc-option=-Werror"
 ];
@@ -15040,7 +15042,6 @@ generic-arbitrary
 haskeline
 lens
 loc
-log-warper
 megaparsec
 MonadRandom
 mtl
@@ -15079,7 +15080,6 @@ cardano-sl-infra
 cardano-sl-networking
 cardano-sl-util
 formatting
-log-warper
 network-transport-tcp
 safe-exceptions
 temporary
@@ -15151,6 +15151,7 @@ version = "1.3.0";
 src = ./../binary;
 configureFlags = [
 "--ghc-option=-fwarn-redundant-constraints"
+"--ghc-option=-Wall"
 "--ghc-option=-Wcompat"
 "--ghc-option=-Werror"
 ];
@@ -15249,6 +15250,7 @@ version = "1.3.0";
 src = ./../binary/test;
 configureFlags = [
 "--ghc-option=-fwarn-redundant-constraints"
+"--ghc-option=-Wall"
 "--ghc-option=-Wcompat"
 "--ghc-option=-Werror"
 ];
@@ -15320,7 +15322,6 @@ license = stdenv.lib.licenses.mit;
 , hedgehog
 , hspec
 , lens
-, log-warper
 , lrucache
 , memory
 , mmorph
@@ -15352,6 +15353,7 @@ version = "1.3.0";
 src = ./../chain;
 configureFlags = [
 "--ghc-option=-fwarn-redundant-constraints"
+"--ghc-option=-Wall"
 "--ghc-option=-Wcompat"
 "--ghc-option=-Werror"
 ];
@@ -15381,7 +15383,6 @@ formatting
 free
 hashable
 lens
-log-warper
 lrucache
 memory
 mmorph
@@ -15488,6 +15489,7 @@ version = "1.3.0";
 src = ./../chain/test;
 configureFlags = [
 "--ghc-option=-fwarn-redundant-constraints"
+"--ghc-option=-Wall"
 "--ghc-option=-Wcompat"
 "--ghc-option=-Werror"
 ];
@@ -15526,6 +15528,7 @@ license = stdenv.lib.licenses.mit;
 , cardano-sl
 , cardano-sl-chain
 , cardano-sl-core
+, cardano-sl-core-test
 , cardano-sl-crypto
 , cardano-sl-crypto-test
 , cardano-sl-db
@@ -15538,7 +15541,6 @@ license = stdenv.lib.licenses.mit;
 , formatting
 , hspec
 , lens
-, log-warper
 , mtl
 , QuickCheck
 , safe-exceptions
@@ -15557,6 +15559,7 @@ version = "1.3.0";
 src = ./../client;
 configureFlags = [
 "--ghc-option=-fwarn-redundant-constraints"
+"--ghc-option=-Wall"
 "--ghc-option=-Wcompat"
 "--ghc-option=-Werror"
 ];
@@ -15573,7 +15576,6 @@ containers
 data-default
 formatting
 lens
-log-warper
 mtl
 QuickCheck
 safe-exceptions
@@ -15593,6 +15595,7 @@ bytestring
 cardano-sl
 cardano-sl-chain
 cardano-sl-core
+cardano-sl-core-test
 cardano-sl-crypto
 cardano-sl-crypto-test
 cardano-sl-db
@@ -15654,7 +15657,6 @@ license = stdenv.lib.licenses.mit;
 , hedgehog
 , hspec
 , lens
-, log-warper
 , memory
 , mmorph
 , monad-control
@@ -15694,6 +15696,7 @@ version = "1.3.0";
 src = ./../core;
 configureFlags = [
 "--ghc-option=-fwarn-redundant-constraints"
+"--ghc-option=-Wall"
 "--ghc-option=-Wcompat"
 "--ghc-option=-Werror"
 ];
@@ -15726,7 +15729,6 @@ fmt
 formatting
 hashable
 lens
-log-warper
 memory
 mmorph
 monad-control
@@ -15835,6 +15837,7 @@ version = "1.3.0";
 src = ./../core/test;
 configureFlags = [
 "--ghc-option=-fwarn-redundant-constraints"
+"--ghc-option=-Wall"
 "--ghc-option=-Wcompat"
 "--ghc-option=-Werror"
 ];
@@ -15891,7 +15894,6 @@ license = stdenv.lib.licenses.mit;
 , cryptonite
 , cryptonite-openssl
 , data-default
-, ed25519
 , formatting
 , generic-arbitrary
 , hashable
@@ -15920,6 +15922,7 @@ version = "1.3.0";
 src = ./../crypto;
 configureFlags = [
 "--ghc-option=-fwarn-redundant-constraints"
+"--ghc-option=-Wall"
 "--ghc-option=-Wcompat"
 "--ghc-option=-Werror"
 ];
@@ -15937,7 +15940,6 @@ cereal
 cryptonite
 cryptonite-openssl
 data-default
-ed25519
 formatting
 hashable
 lens
@@ -16008,6 +16010,7 @@ version = "1.3.0";
 src = ./../crypto/test;
 configureFlags = [
 "--ghc-option=-fwarn-redundant-constraints"
+"--ghc-option=-Wall"
 "--ghc-option=-Wcompat"
 "--ghc-option=-Werror"
 ];
@@ -16047,6 +16050,7 @@ license = stdenv.lib.licenses.mit;
 , cardano-sl-core-test
 , cardano-sl-crypto
 , cardano-sl-util
+, cardano-sl-util-test
 , concurrent-extra
 , conduit
 , containers
@@ -16061,7 +16065,6 @@ license = stdenv.lib.licenses.mit;
 , formatting
 , hedgehog
 , lens
-, log-warper
 , lrucache
 , memory
 , mmorph
@@ -16088,6 +16091,7 @@ version = "1.3.0";
 src = ./../db;
 configureFlags = [
 "--ghc-option=-fwarn-redundant-constraints"
+"--ghc-option=-Wall"
 "--ghc-option=-Wcompat"
 "--ghc-option=-Werror"
 ];
@@ -16113,7 +16117,6 @@ exceptions
 filepath
 formatting
 lens
-log-warper
 lrucache
 memory
 mmorph
@@ -16139,6 +16142,7 @@ base
 cardano-sl-binary-test
 cardano-sl-core
 cardano-sl-core-test
+cardano-sl-util-test
 filepath
 hedgehog
 temporary
@@ -16174,6 +16178,7 @@ version = "1.3.0";
 src = ./../db/test;
 configureFlags = [
 "--ghc-option=-fwarn-redundant-constraints"
+"--ghc-option=-Wall"
 "--ghc-option=-Wcompat"
 "--ghc-option=-Werror"
 ];
@@ -16233,7 +16238,6 @@ license = stdenv.lib.licenses.mit;
 , hspec
 , http-types
 , lens
-, log-warper
 , memory
 , mmorph
 , mtl
@@ -16275,6 +16279,7 @@ version = "1.3.0";
 src = ./../explorer;
 configureFlags = [
 "--ghc-option=-fwarn-redundant-constraints"
+"--ghc-option=-Wall"
 "--ghc-option=-Wcompat"
 "--ghc-option=-Werror"
 ];
@@ -16289,6 +16294,7 @@ cardano-sl-binary
 cardano-sl-chain
 cardano-sl-chain-test
 cardano-sl-core
+cardano-sl-core-test
 cardano-sl-crypto
 cardano-sl-crypto-test
 cardano-sl-db
@@ -16306,7 +16312,6 @@ formatting
 free
 http-types
 lens
-log-warper
 memory
 mmorph
 mtl
@@ -16348,7 +16353,6 @@ cardano-sl-infra
 cardano-sl-networking
 cardano-sl-util
 lens
-log-warper
 optparse-applicative
 optparse-simple
 purescript-bridge
@@ -16378,7 +16382,6 @@ engine-io
 generic-arbitrary
 hspec
 lens
-log-warper
 QuickCheck
 universum
 warp
@@ -16457,6 +16460,7 @@ version = "1.3.0";
 src = ./../generator;
 configureFlags = [
 "--ghc-option=-fwarn-redundant-constraints"
+"--ghc-option=-Wall"
 "--ghc-option=-Wcompat"
 "--ghc-option=-Werror"
 ];
@@ -16482,7 +16486,6 @@ ether
 exceptions
 formatting
 lens
-log-warper
 monad-control
 MonadRandom
 QuickCheck
@@ -16515,7 +16518,12 @@ criterion
 deepseq
 directory
 formatting
+<<<<<<< HEAD
 log-warper
+=======
+lens
+lrucache
+>>>>>>> develop
 MonadRandom
 optparse-applicative
 random
@@ -16623,7 +16631,6 @@ license = stdenv.lib.licenses.mit;
 , iproute
 , kademlia
 , lens
-, log-warper
 , lzma-conduit
 , mtl
 , network-info
@@ -16654,6 +16661,7 @@ version = "1.3.0";
 src = ./../infra;
 configureFlags = [
 "--ghc-option=-fwarn-redundant-constraints"
+"--ghc-option=-Wall"
 "--ghc-option=-Wcompat"
 "--ghc-option=-Werror"
 ];
@@ -16689,7 +16697,6 @@ http-client-tls
 iproute
 kademlia
 lens
-log-warper
 lzma-conduit
 mtl
 network-info
@@ -16831,7 +16838,11 @@ license = stdenv.lib.licenses.mit;
 , hspec-core
 , kademlia
 , lens
+<<<<<<< HEAD
 , log-warper
+=======
+, monad-control
+>>>>>>> develop
 , mtl
 , mwc-random
 , network
@@ -16883,7 +16894,11 @@ formatting
 hashable
 kademlia
 lens
+<<<<<<< HEAD
 log-warper
+=======
+monad-control
+>>>>>>> develop
 mtl
 network
 network-transport
@@ -16921,7 +16936,6 @@ containers
 hspec
 hspec-core
 lens
-log-warper
 mtl
 network-transport
 network-transport-inmemory
@@ -16958,7 +16972,6 @@ license = stdenv.lib.licenses.mit;
 , cardano-sl-networking
 , cardano-sl-util
 , cpphs
-, log-warper
 , stdenv
 , universum
 }:
@@ -16969,6 +16982,7 @@ version = "1.3.0";
 src = ./../node;
 configureFlags = [
 "--ghc-option=-fwarn-redundant-constraints"
+"--ghc-option=-Wall"
 "--ghc-option=-Wcompat"
 "--ghc-option=-Werror"
 ];
@@ -16981,7 +16995,6 @@ cardano-sl-chain
 cardano-sl-crypto
 cardano-sl-networking
 cardano-sl-util
-log-warper
 universum
 ];
 executableToolDepends = [
@@ -17001,7 +17014,7 @@ license = stdenv.lib.licenses.mit;
 , bytestring
 , Cabal
 , cardano-sl-infra
-, log-warper
+, cardano-sl-util
 , mtl
 , stdenv
 , universum
@@ -17013,6 +17026,7 @@ version = "1.3.0";
 src = ./../node-ipc;
 configureFlags = [
 "--ghc-option=-fwarn-redundant-constraints"
+"--ghc-option=-Wall"
 "--ghc-option=-Wcompat"
 "--ghc-option=-Werror"
 ];
@@ -17023,7 +17037,7 @@ binary
 bytestring
 Cabal
 cardano-sl-infra
-log-warper
+cardano-sl-util
 mtl
 universum
 ];
@@ -17077,7 +17091,6 @@ license = stdenv.lib.licenses.mit;
 , ip
 , lens
 , lifted-async
-, log-warper
 , mtl
 , neat-interpolation
 , network-transport
@@ -17116,6 +17129,7 @@ version = "1.3.0";
 src = ./../tools;
 configureFlags = [
 "--ghc-option=-fwarn-redundant-constraints"
+"--ghc-option=-Wall"
 "--ghc-option=-Wcompat"
 "--ghc-option=-Werror"
 ];
@@ -17141,7 +17155,6 @@ containers
 data-default
 directory
 filepath
-log-warper
 network-transport-tcp
 optparse-applicative
 optparse-generic
@@ -17194,7 +17207,6 @@ hourglass
 ip
 lens
 lifted-async
-log-warper
 mtl
 neat-interpolation
 network-transport
@@ -17247,6 +17259,7 @@ license = stdenv.lib.licenses.mit;
   mkDerivation
 , aeson
 , async
+, auto-update
 , base
 , bytestring
 , canonical-json
@@ -17267,6 +17280,7 @@ license = stdenv.lib.licenses.mit;
 , hashable
 , hedgehog
 , hspec
+, katip
 , lens
 , log-warper
 , lrucache
@@ -17294,6 +17308,7 @@ license = stdenv.lib.licenses.mit;
 , universum
 , unliftio-core
 , unordered-containers
+, yaml
 }:
 mkDerivation {
 
@@ -17302,11 +17317,13 @@ version = "1.3.0";
 src = ./../util;
 configureFlags = [
 "--ghc-option=-fwarn-redundant-constraints"
+"--ghc-option=-Wall"
 "--ghc-option=-Wcompat"
 "--ghc-option=-Werror"
 ];
 libraryHaskellDepends = [
 aeson
+auto-update
 base
 canonical-json
 cborg
@@ -17323,6 +17340,7 @@ file-embed
 filepath
 formatting
 hashable
+katip
 lens
 log-warper
 lrucache
@@ -17346,6 +17364,7 @@ transformers-lift
 universum
 unliftio-core
 unordered-containers
+yaml
 ];
 libraryToolDepends = [
 cpphs
@@ -17376,6 +17395,7 @@ testToolDepends = [
 cpphs
 ];
 doHaddock = false;
+homepage = "https://github.com/input-output-hk/cardano-sl";
 description = "Cardano SL - general utilities";
 license = stdenv.lib.licenses.mit;
 
@@ -17415,6 +17435,7 @@ version = "1.3.0";
 src = ./../util/test;
 configureFlags = [
 "--ghc-option=-fwarn-redundant-constraints"
+"--ghc-option=-Wall"
 "--ghc-option=-Wcompat"
 "--ghc-option=-Werror"
 ];
@@ -17491,11 +17512,11 @@ license = stdenv.lib.licenses.mit;
 , hashable
 , hspec
 , lens
-, log-warper
 , memory
 , monad-control
 , MonadRandom
 , mtl
+, pvss
 , QuickCheck
 , random
 , reflection
@@ -17532,6 +17553,7 @@ version = "1.3.0";
 src = ./../wallet;
 configureFlags = [
 "--ghc-option=-fwarn-redundant-constraints"
+"--ghc-option=-Wall"
 "--ghc-option=-Wcompat"
 "--ghc-option=-Werror"
 ];
@@ -17549,6 +17571,7 @@ cardano-sl
 cardano-sl-chain
 cardano-sl-client
 cardano-sl-core
+cardano-sl-core-test
 cardano-sl-crypto
 cardano-sl-db
 cardano-sl-generator
@@ -17569,7 +17592,6 @@ formatting
 hashable
 hspec
 lens
-log-warper
 memory
 monad-control
 mtl
@@ -17629,13 +17651,14 @@ ether
 formatting
 hspec
 lens
-log-warper
 MonadRandom
 mtl
+pvss
 QuickCheck
 safe-exceptions
 safecopy
 serokell-util
+servant
 servant-server
 stm
 universum
@@ -17659,19 +17682,23 @@ license = stdenv.lib.licenses.mit;
 , aeson-pretty
 , async
 , base
+, base58-bytestring
 , beam-core
 , beam-migrate
 , beam-sqlite
+, bifunctors
 , bytestring
 , cardano-crypto
 , cardano-sl
 , cardano-sl-binary
 , cardano-sl-binary-test
 , cardano-sl-chain
+, cardano-sl-chain-test
 , cardano-sl-client
 , cardano-sl-core
 , cardano-sl-core-test
 , cardano-sl-crypto
+, cardano-sl-crypto-test
 , cardano-sl-db
 , cardano-sl-infra
 , cardano-sl-networking
@@ -17679,8 +17706,8 @@ license = stdenv.lib.licenses.mit;
 , cardano-sl-util
 , cardano-sl-util-test
 , cardano-sl-wallet
-, cardano-sl-wallet-test
 , cassava
+, cereal
 , conduit
 , connection
 , constraints
@@ -17689,21 +17716,22 @@ license = stdenv.lib.licenses.mit;
 , data-default
 , data-default-class
 , directory
+, ed25519
 , exceptions
 , filepath
+, foldl
 , formatting
 , gauge
 , generics-sop
 , hedgehog
 , hspec
+, hspec-core
 , http-api-data
 , http-client
 , http-client-tls
 , http-types
 , ixset-typed
-, json-sop
 , lens
-, log-warper
 , memory
 , mtl
 , mwc-random
@@ -17762,6 +17790,7 @@ version = "1.3.0";
 src = ./../wallet-new;
 configureFlags = [
 "--ghc-option=-fwarn-redundant-constraints"
+"--ghc-option=-Wall"
 "--ghc-option=-Wcompat"
 "--ghc-option=-Werror"
 ];
@@ -17774,9 +17803,11 @@ aeson-options
 aeson-pretty
 async
 base
+base58-bytestring
 beam-core
 beam-migrate
 beam-sqlite
+bifunctors
 bytestring
 cardano-crypto
 cardano-sl
@@ -17792,7 +17823,7 @@ cardano-sl-networking
 cardano-sl-node-ipc
 cardano-sl-util
 cardano-sl-wallet
-cardano-sl-wallet-test
+cereal
 conduit
 connection
 containers
@@ -17800,7 +17831,9 @@ cryptonite
 data-default
 data-default-class
 directory
+ed25519
 exceptions
+foldl
 formatting
 generics-sop
 http-api-data
@@ -17808,9 +17841,7 @@ http-client
 http-client-tls
 http-types
 ixset-typed
-json-sop
 lens
-log-warper
 memory
 mtl
 mwc-random
@@ -17875,7 +17906,6 @@ hspec
 http-client
 http-types
 lens
-log-warper
 mtl
 optparse-applicative
 pretty-show
@@ -17900,14 +17930,18 @@ cardano-sl
 cardano-sl-binary
 cardano-sl-binary-test
 cardano-sl-chain
+cardano-sl-chain-test
 cardano-sl-client
 cardano-sl-core
 cardano-sl-core-test
 cardano-sl-crypto
+cardano-sl-crypto-test
 cardano-sl-db
+cardano-sl-networking
 cardano-sl-util
 cardano-sl-util-test
 cardano-sl-wallet
+cereal
 conduit
 constraints
 containers
@@ -17918,8 +17952,11 @@ filepath
 formatting
 hedgehog
 hspec
+<<<<<<< HEAD
+=======
+hspec-core
+>>>>>>> develop
 lens
-log-warper
 mtl
 normaldistribution
 optparse-applicative
@@ -17928,6 +17965,7 @@ quickcheck-instances
 random
 reflection
 safe-exceptions
+safecopy
 serokell-util
 servant
 servant-server
@@ -17937,6 +17975,7 @@ swagger2
 tabl
 text
 time
+time-units
 universum
 unordered-containers
 vector
@@ -24970,10 +25009,10 @@ license = stdenv.lib.licenses.bsd3;
 mkDerivation {
 
 pname = "diagrams-lib";
-version = "1.4.2";
-sha256 = "e9d41742ed3a92b9dff847c3936746e5a95cc4e187b7e4c35c3e3068c842afe5";
-revision = "1";
-editedCabalFile = "0vz16br2gn4agi35k92qw84cja2dqj63g7q3ak64jhc8r99bd4a1";
+version = "1.4.2.2";
+sha256 = "470bbb94e942c173afae9837723dc151b627cc15e81aebfa22c88622a60bd6e5";
+revision = "3";
+editedCabalFile = "033w27x3w0s567hsifb7nxc1msv9fvzz8idl88n8d5pifpgxg803";
 libraryHaskellDepends = [
 active
 adjunctions
@@ -25025,7 +25064,6 @@ license = stdenv.lib.licenses.bsd3;
 , diagrams-core
 , diagrams-lib
 , dlist
-, filepath
 , hashable
 , lens
 , monoid-extras
@@ -25038,10 +25076,10 @@ license = stdenv.lib.licenses.bsd3;
 mkDerivation {
 
 pname = "diagrams-postscript";
-version = "1.4";
-sha256 = "fe58f0010520716f66802adb0c1f70f48e77e9c4fcea5441e5343f4c1a5f8db4";
+version = "1.4.1";
+sha256 = "a758191d99c30bd663dc0df2dedef13cd735a33c143e77906aa88baceb282c9c";
 revision = "1";
-editedCabalFile = "0vmiv3b74nml0ahb7dicq0m0vz2lahzfapln9aby0jb2saa0sf58";
+editedCabalFile = "0z0rh7lwyr3vx6llq6q9s5f1vzqk4zxpcg5ibfn5jdp274kfd7r1";
 libraryHaskellDepends = [
 base
 containers
@@ -25049,7 +25087,6 @@ data-default-class
 diagrams-core
 diagrams-lib
 dlist
-filepath
 hashable
 lens
 monoid-extras
@@ -25114,8 +25151,10 @@ license = stdenv.lib.licenses.bsd3;
 mkDerivation {
 
 pname = "diagrams-svg";
-version = "1.4.1.1";
-sha256 = "c80668c6ac1bf62b108016d36bfe3e603897ca8e331522b0e80b77152915daaa";
+version = "1.4.2";
+sha256 = "5455b68d92826a5405d51490976870cc0fa5b8b56aef0a8f56982b5f48efded2";
+revision = "1";
+editedCabalFile = "1mb2fdfvy0c1v7nahspq2cisfqrn37xjh4a6xhqr3b36pfz8rwnd";
 libraryHaskellDepends = [
 base
 base64-bytestring
@@ -27093,7 +27132,6 @@ license = stdenv.lib.licenses.bsd3;
   mkDerivation
 , base
 , bytestring
-, fetchgit
 , ghc-prim
 , stdenv
 }:
@@ -27101,13 +27139,9 @@ mkDerivation {
 
 pname = "ed25519";
 version = "0.0.5.0";
-src = fetchgit {
-
-url = "https://github.com/thoughtpolice/hs-ed25519";
-sha256 = "0fah4vkmqdkjsdh3s3x27yfaif2fbdg6049xvp54b5mh50yvxkfq";
-rev = "da4247b5b3420120e20451e6a252e2a2ca15b43c";
-
-};
+sha256 = "d8a5958ebfa9309790efade64275dc5c441b568645c45ceed1b0c6ff36d6156d";
+revision = "2";
+editedCabalFile = "1cq6h3jqkb1kvd9fjfhsllg5gq78sdiyf2gy9862xhlbv6wil19f";
 libraryHaskellDepends = [
 base
 bytestring
@@ -27115,7 +27149,7 @@ ghc-prim
 ];
 doHaddock = false;
 doCheck = false;
-homepage = "https://thoughtpolice.github.com/hs-ed25519";
+homepage = "http://thoughtpolice.github.com/hs-ed25519";
 description = "Ed25519 cryptographic signatures";
 license = stdenv.lib.licenses.mit;
 
@@ -29921,8 +29955,8 @@ license = stdenv.lib.licenses.bsd3;
 mkDerivation {
 
 pname = "fgl";
-version = "5.6.0.0";
-sha256 = "94722e1eb3dca66069e26a2d4b072c558bc896816ee016fc99521f3e16b9ccc4";
+version = "5.5.4.0";
+sha256 = "5176891dc0a898a87df53e1b27db5eba7474f08207405a1ea06c988c09a97211";
 libraryHaskellDepends = [
 array
 base
@@ -47725,6 +47759,81 @@ doHaddock = false;
 doCheck = false;
 homepage = "https://github.com/fosskers/kanji";
 description = "Perform 漢字検定 (Japan Kanji Aptitude Test) level analysis on Japanese Kanji";
+license = stdenv.lib.licenses.bsd3;
+
+}) {};
+"katip" = callPackage
+({
+  mkDerivation
+, aeson
+, async
+, auto-update
+, base
+, bytestring
+, containers
+, either
+, hostname
+, microlens
+, microlens-th
+, monad-control
+, mtl
+, old-locale
+, resourcet
+, safe-exceptions
+, scientific
+, semigroups
+, stdenv
+, stm
+, string-conv
+, template-haskell
+, text
+, time
+, transformers
+, transformers-base
+, transformers-compat
+, unix
+, unliftio-core
+, unordered-containers
+}:
+mkDerivation {
+
+pname = "katip";
+version = "0.5.5.1";
+sha256 = "0b0c5b66fda945ea56522724aadb25980d5d1cac83999b45c6a11b9ba59ce260";
+libraryHaskellDepends = [
+aeson
+async
+auto-update
+base
+bytestring
+containers
+either
+hostname
+microlens
+microlens-th
+monad-control
+mtl
+old-locale
+resourcet
+safe-exceptions
+scientific
+semigroups
+stm
+string-conv
+template-haskell
+text
+time
+transformers
+transformers-base
+transformers-compat
+unix
+unliftio-core
+unordered-containers
+];
+doHaddock = false;
+doCheck = false;
+homepage = "https://github.com/Soostone/katip";
+description = "A structured logging framework";
 license = stdenv.lib.licenses.bsd3;
 
 }) {};

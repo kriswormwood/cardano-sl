@@ -51,8 +51,7 @@ genPending :: Core.ProtocolMagic -> Gen Pending
 genPending pMagic = do
     elems <- listOf (do tx  <- Txp.genTx
                         wit <- (V.fromList <$> listOf (Txp.genTxInWitness pMagic))
-                        aux <- Txp.TxAux <$> pure tx <*> pure wit
-                        pure aux
+                        Txp.TxAux <$> pure tx <*> pure wit
                     )
     return $ Pending.fromTransactions elems
 
@@ -105,9 +104,6 @@ genWalletSubmission accId maxRetries rho =
 {-------------------------------------------------------------------------------
   Submission layer tests
 -------------------------------------------------------------------------------}
-
-instance (Buildable a, Buildable b) => Buildable (a,b) where
-    build (a,b) = bprint ("(" % F.build % "," % F.build % ")") a b
 
 instance Buildable [LabelledTxAux] where
     build xs = bprint (listJsonIndent 4) xs

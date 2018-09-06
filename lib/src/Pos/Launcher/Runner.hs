@@ -1,14 +1,13 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE CPP                 #-}
 {-# LANGUAGE RankNTypes          #-}
+{-# LANGUAGE RecordWildCards     #-}
 
 -- | Runners in various modes.
 
 module Pos.Launcher.Runner
        ( -- * High level runners
          runRealMode
-
-       , elimRealMode
 
        -- * Exported for custom usage in CLI utils
        , runServer
@@ -31,9 +30,7 @@ import           Pos.Chain.Update (HasUpdateConfiguration,
 import           Pos.Configuration (HasNodeConfiguration,
                      networkConnectionTimeout)
 import           Pos.Context.Context (NodeContext (..))
-import           Pos.Core (StakeholderId, addressHash)
-import           Pos.Core.Configuration (HasProtocolConstants,
-                     protocolConstants)
+import           Pos.Core as Core (Config (..), StakeholderId, addressHash)
 import           Pos.Core.JsonLog (jsonLog)
 import           Pos.Crypto (ProtocolMagic, toPublic)
 import           Pos.DB.Txp (MonadTxpLocal)
@@ -76,13 +73,13 @@ runRealMode
        -- explorer and wallet use RealMode,
        -- though they should use only @RealModeContext@
        )
-    => ProtocolMagic
+    => Core.Config
     -> TxpConfiguration
     -> NodeResources ext
     -> (Diffusion (RealMode ext) -> RealMode ext a)
     -> IO a
-runRealMode pm txpConfig nr@NodeResources {..} act = runServer
-    pm
+runRealMode coreConfig txpConfig nr@NodeResources {..} act = runServer
+    coreConfig
     ncNodeParams
     (EkgNodeMetrics nrEkgStore)
     ncShutdownContext
@@ -90,12 +87,13 @@ runRealMode pm txpConfig nr@NodeResources {..} act = runServer
     act'
   where
     NodeContext {..} = nrContext
-    NodeParams {..} = ncNodeParams
-    securityParams = bcSecurityParams npBehaviorConfig
+    NodeParams {..}  = ncNodeParams
+    securityParams   = bcSecurityParams npBehaviorConfig
     ourStakeholderId :: StakeholderId
     ourStakeholderId = addressHash (toPublic npSecretKey)
     logic :: Logic (RealMode ext)
-    logic = logicFull pm txpConfig ourStakeholderId securityParams jsonLog
+    logic = logicFull coreConfig txpConfig ourStakeholderId securityParams jsonLog
+    pm = configProtocolMagic coreConfig
     makeLogicIO :: Diffusion IO -> Logic IO
     makeLogicIO diffusion = hoistLogic (elimRealMode pm nr diffusion) logic
     act' :: Diffusion IO -> IO a
@@ -145,20 +143,16 @@ elimRealMode pm NodeResources {..} diffusion action = do
 -- network connection timeout (nt-tcp), and, and the 'recoveryHeadersMessage'
 -- number.
 runServer
-    :: forall t .
-       ( HasProtocolConstants
-       , HasBlockConfiguration
-       , HasNodeConfiguration
-       , HasUpdateConfiguration
-       )
-    => ProtocolMagic
+    :: forall t
+     . (HasBlockConfiguration, HasNodeConfiguration, HasUpdateConfiguration)
+    => Core.Config
     -> NodeParams
     -> EkgNodeMetrics
     -> ShutdownContext
     -> (Diffusion IO -> Logic IO)
     -> (Diffusion IO -> IO t)
     -> IO t
-runServer pm NodeParams {..} ekgNodeMetrics shdnContext mkLogic act = exitOnShutdown $
+runServer coreConfig NodeParams {..} ekgNodeMetrics shdnContext mkLogic act = exitOnShutdown $
     diffusionLayerFull fdconf
                        npNetworkConfig
                        (Just ekgNodeMetrics)
@@ -174,8 +168,8 @@ runServer pm NodeParams {..} ekgNodeMetrics shdnContext mkLogic act = exitOnShut
 
   where
     fdconf = FullDiffusionConfiguration
-        { fdcProtocolMagic = pm
-        , fdcProtocolConstants = protocolConstants
+        { fdcProtocolMagic = configProtocolMagic coreConfig
+        , fdcProtocolConstants = configProtocolConstants coreConfig
         , fdcRecoveryHeadersMessage = recoveryHeadersMessage
         , fdcLastKnownBlockVersion = lastKnownBlockVersion
         , fdcConvEstablishTimeout = networkConnectionTimeout

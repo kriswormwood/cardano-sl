@@ -1,18 +1,18 @@
-{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE RankNTypes      #-}
+{-# LANGUAGE RecordWildCards #-}
 
 -- | Applications of runners to scenarios.
 
 module Pos.Launcher.Launcher
        ( -- * Node launcher.
-         runNodeReal
+         runNodeRealSimple
        ) where
 
 import           Universum
 
 import           Pos.Chain.Ssc (SscParams)
 import           Pos.Chain.Txp (TxpConfiguration)
-import           Pos.Core.Configuration (epochSlots)
-import           Pos.Crypto (ProtocolMagic)
+import           Pos.Core as Core (Config (..))
 import           Pos.DB.DB (initNodeDBs)
 import           Pos.DB.Txp (txpGlobalSettings)
 import           Pos.Infra.Diffusion.Types (Diffusion)
@@ -30,18 +30,29 @@ import           Pos.WorkMode (EmptyMempoolExt, RealMode)
 -----------------------------------------------------------------------------
 
 -- | Run full node in real mode.
-runNodeReal
-    :: ( HasConfigurations
-       , HasCompileInfo
-       )
-    => ProtocolMagic
+-- This function is *only* used by `cardano-node-simple`, the node without
+-- wallet functionality.
+runNodeRealSimple
+    :: (HasConfigurations, HasCompileInfo)
+    => Core.Config
     -> TxpConfiguration
     -> NodeParams
     -> SscParams
-    -> [Diffusion (RealMode EmptyMempoolExt) -> RealMode EmptyMempoolExt ()]
+    -> [  Diffusion (RealMode EmptyMempoolExt)
+       -> RealMode EmptyMempoolExt ()
+       ]
     -> IO ()
-runNodeReal pm txpConfig np sscnp plugins =
-    bracketNodeResources np sscnp (txpGlobalSettings pm txpConfig) (initNodeDBs pm epochSlots) action
+runNodeRealSimple coreConfig txpConfig np sscnp plugins = bracketNodeResources
+    coreConfig
+    np
+    sscnp
+    (txpGlobalSettings coreConfig txpConfig)
+    (initNodeDBs coreConfig)
+    action
   where
     action :: NodeResources EmptyMempoolExt -> IO ()
-    action nr@NodeResources {..} = runRealMode pm txpConfig nr (runNode pm txpConfig nr plugins)
+    action nr@NodeResources {..} = runRealMode
+        coreConfig
+        txpConfig
+        nr
+        (runNode coreConfig txpConfig nr plugins)

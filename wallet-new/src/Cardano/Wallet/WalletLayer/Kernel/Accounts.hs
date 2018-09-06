@@ -1,6 +1,8 @@
 module Cardano.Wallet.WalletLayer.Kernel.Accounts (
     createAccount
   , getAccount
+  , getAccountBalance
+  , getAccountAddresses
   , getAccounts
   , deleteAccount
   , updateAccount
@@ -13,14 +15,15 @@ import           Data.Coerce (coerce)
 import qualified Pos.Core as Core
 import           Pos.Crypto.Signing
 
-import           Cardano.Wallet.API.V1.Types (V1 (..))
+import           Cardano.Wallet.API.Request (RequestParams, SortOperations (..))
+import           Cardano.Wallet.API.Request.Filter (FilterOperations (..))
+import           Cardano.Wallet.API.Response (WalletResponse, respondWith)
+import           Cardano.Wallet.API.V1.Types (V1 (..), WalletAddress)
 import qualified Cardano.Wallet.API.V1.Types as V1
 import qualified Cardano.Wallet.Kernel.Accounts as Kernel
 import qualified Cardano.Wallet.Kernel.Addresses as Kernel
 import qualified Cardano.Wallet.Kernel.DB.HdWallet as HD
-import           Cardano.Wallet.Kernel.DB.HdWallet.Read (readAccountsByRootId,
-                     readHdAccount)
-import           Cardano.Wallet.Kernel.DB.Util.IxSet (IxSet)
+import           Cardano.Wallet.Kernel.DB.Util.IxSet (Indexed (..), IxSet)
 import qualified Cardano.Wallet.Kernel.DB.Util.IxSet as IxSet
 import qualified Cardano.Wallet.Kernel.Internal as Kernel
 import qualified Cardano.Wallet.Kernel.Read as Kernel
@@ -79,11 +82,10 @@ getAccounts :: V1.WalletId
 getAccounts wId snapshot = runExcept $ do
     rootId <- withExceptT GetAccountsWalletIdDecodingFailed $ fromRootId wId
     fmap conv $
-      withExceptT GetAccountsError $ exceptT $
-        readAccountsByRootId rootId wallets
+      withExceptT GetAccountsError $ exceptT $ do
+        _rootExists <- Kernel.lookupHdRootId snapshot rootId
+        return $ Kernel.accountsByRootId snapshot rootId
   where
-    wallets = Kernel.hdWallets snapshot
-
     -- NOTE(adn) [CBR-347] This has currently terrible performance due to the
     -- fact we still have to unify the 'IxSet' with the 'IxSet'. Not only that,
     -- but due to the fact we cannot map directly on an 'IxSet' (neither the
@@ -112,9 +114,18 @@ getAccount wId accIx snapshot = runExcept $ do
                fromAccountId wId accIx
     fmap (toAccount snapshot) $
       withExceptT (GetAccountError . V1) $ exceptT $
-        readHdAccount accId wallets
-  where
-    wallets = Kernel.hdWallets snapshot
+        Kernel.lookupHdAccountId snapshot accId
+
+getAccountBalance :: V1.WalletId
+                  -> V1.AccountIndex
+                  -> Kernel.DB
+                  -> Either GetAccountError V1.AccountBalance
+getAccountBalance wId accIx snapshot = runExcept $ do
+    accId <- withExceptT GetAccountWalletIdDecodingFailed $
+               fromAccountId wId accIx
+    fmap (V1.AccountBalance . V1) $
+      withExceptT (GetAccountError . V1) $ exceptT $
+        Kernel.currentTotalBalance snapshot accId
 
 deleteAccount :: MonadIO m
               => Kernel.PassiveWallet
@@ -139,3 +150,28 @@ updateAccount wallet wId accIx (V1.AccountUpdate newName) = runExceptT $ do
     fmap (uncurry toAccount) $
       withExceptT (UpdateAccountError . V1) $ ExceptT $ liftIO $
         Kernel.updateAccount accId (HD.AccountName newName) wallet
+
+getAccountAddresses :: V1.WalletId
+                    -> V1.AccountIndex
+                    -> RequestParams
+                    -> FilterOperations '[V1 Core.Address] WalletAddress
+                    -> Kernel.DB
+                    -> Either GetAccountError (WalletResponse [V1.WalletAddress])
+getAccountAddresses wId accIx rp fo snapshot = runExcept $ do
+    accId <- withExceptT GetAccountWalletIdDecodingFailed $
+               fromAccountId wId accIx
+    acc   <- withExceptT (GetAccountError . V1) $ exceptT $
+               Kernel.lookupHdAccountId snapshot accId
+    let allAddrs = Kernel.addressesByAccountId snapshot accId
+    resp  <- respondWith rp (filterHdAddress fo) NoSorts $ return allAddrs
+    return $ map (toAddress acc . _ixedIndexed) <$> resp
+
+{-------------------------------------------------------------------------------
+  Auxiliary
+-------------------------------------------------------------------------------}
+
+filterHdAddress :: FilterOperations '[V1 Core.Address] WalletAddress
+                -> FilterOperations '[V1 Core.Address] (Indexed HD.HdAddress)
+filterHdAddress NoFilters               = NoFilters
+filterHdAddress (FilterNop NoFilters)   = FilterNop NoFilters
+filterHdAddress (FilterOp op NoFilters) = FilterOp (coerce op) NoFilters

@@ -1,4 +1,5 @@
-{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE RankNTypes      #-}
+{-# LANGUAGE RecordWildCards #-}
 
 -- | Server which deals with blocks processing.
 
@@ -16,16 +17,15 @@ import           Control.Monad.STM (retry)
 import qualified Data.List.NonEmpty as NE
 import           Data.Time.Units (Second)
 import           Formatting (build, int, sformat, (%))
-import           System.Wlog (logDebug, logError, logInfo, logWarning)
 
 import           Pos.Chain.Block (Block, BlockHeader, HasHeaderHash (..),
                      HeaderHash)
 import           Pos.Chain.Txp (TxpConfiguration)
-import           Pos.Core (difficultyL, isMoreDifficult)
+import           Pos.Core as Core (Config, difficultyL, isMoreDifficult)
 import           Pos.Core.Chrono (NE, OldestFirst (..), _OldestFirst)
 import           Pos.Core.Conc (delay)
 import           Pos.Core.Reporting (HasMisbehaviorMetrics)
-import           Pos.Crypto (ProtocolMagic, shortHashF)
+import           Pos.Crypto (shortHashF)
 import           Pos.DB.Block (ClassifyHeaderRes (..), classifyNewHeader,
                      getHeadersOlderExp)
 import qualified Pos.DB.BlockIndex as DB
@@ -40,6 +40,7 @@ import           Pos.Network.Block.RetrievalQueue (BlockRetrievalQueueTag,
                      BlockRetrievalTask (..))
 import           Pos.Network.Block.WorkMode (BlockWorkMode)
 import           Pos.Util.Util (HasLens (..))
+import           Pos.Util.Wlog (logDebug, logError, logInfo, logWarning)
 
 -- I really don't like join
 {-# ANN retrievalWorker ("HLint: ignore Use join" :: Text) #-}
@@ -59,10 +60,10 @@ retrievalWorker
        ( BlockWorkMode ctx m
        , HasMisbehaviorMetrics ctx
        )
-    => ProtocolMagic
+    => Core.Config
     -> TxpConfiguration
     -> Diffusion m -> m ()
-retrievalWorker pm txpConfig diffusion = do
+retrievalWorker coreConfig txpConfig diffusion = do
     logInfo "Starting retrievalWorker loop"
     mainLoop
   where
@@ -112,9 +113,9 @@ retrievalWorker pm txpConfig diffusion = do
     handleContinues nodeId header = do
         let hHash = headerHash header
         logDebug $ "handleContinues: " <> pretty hHash
-        classifyNewHeader pm header >>= \case
+        classifyNewHeader coreConfig header >>= \case
             CHContinues ->
-                void $ getProcessBlocks pm txpConfig diffusion nodeId (headerHash header) [hHash]
+                void $ getProcessBlocks coreConfig txpConfig diffusion nodeId (headerHash header) [hHash]
             res -> logDebug $
                 "processContHeader: expected header to " <>
                 "be continuation, but it's " <> show res
@@ -124,7 +125,7 @@ retrievalWorker pm txpConfig diffusion = do
     -- enter recovery mode.
     handleAlternative nodeId header = do
         logDebug $ "handleAlternative: " <> pretty (headerHash header)
-        classifyNewHeader pm header >>= \case
+        classifyNewHeader coreConfig header >>= \case
             CHInvalid _ ->
                 logError "handleAlternative: invalid header got into retrievalWorker queue"
             CHUseless _ ->
@@ -156,7 +157,7 @@ retrievalWorker pm txpConfig diffusion = do
         reportOrLogW (sformat
             ("handleRecoveryE: error handling nodeId="%build%", header="%build%": ")
             nodeId (headerHash rHeader)) e
-        dropRecoveryHeaderAndRepeat pm diffusion nodeId
+        dropRecoveryHeaderAndRepeat coreConfig diffusion nodeId
 
     -- Recovery handling. We assume that header in the recovery variable is
     -- appropriate and just query headers/blocks.
@@ -169,8 +170,13 @@ retrievalWorker pm txpConfig diffusion = do
             throwM $ DialogUnexpected $ "handleRecovery: recovery header is " <>
                                         "already present in db"
         logDebug "handleRecovery: fetching blocks"
-        checkpoints <- toList <$> getHeadersOlderExp Nothing
-        void $ streamProcessBlocks pm txpConfig diffusion nodeId (headerHash rHeader) checkpoints
+        checkpoints <- toList <$> getHeadersOlderExp coreConfig Nothing
+        void $ streamProcessBlocks coreConfig
+                                   txpConfig
+                                   diffusion
+                                   nodeId
+                                   (headerHash rHeader)
+                                   checkpoints
 
 ----------------------------------------------------------------------------
 -- Entering and exiting recovery mode
@@ -256,8 +262,12 @@ dropRecoveryHeader nodeId = do
 
 -- | Drops the recovery header and, if it was successful, queries the tips.
 dropRecoveryHeaderAndRepeat
-    :: BlockWorkMode ctx m => ProtocolMagic -> Diffusion m -> NodeId -> m ()
-dropRecoveryHeaderAndRepeat pm diffusion nodeId = do
+    :: BlockWorkMode ctx m
+    => Core.Config
+    -> Diffusion m
+    -> NodeId
+    -> m ()
+dropRecoveryHeaderAndRepeat coreConfig diffusion nodeId = do
     kicked <- dropRecoveryHeader nodeId
     when kicked $ attemptRestartRecovery
   where
@@ -265,7 +275,7 @@ dropRecoveryHeaderAndRepeat pm diffusion nodeId = do
         logDebug "Attempting to restart recovery"
         -- FIXME why delay? Why 2 seconds?
         delay (2 :: Second)
-        handleAny handleRecoveryTriggerE $ triggerRecovery pm diffusion
+        handleAny handleRecoveryTriggerE $ triggerRecovery coreConfig diffusion
         logDebug "Attempting to restart recovery over"
     handleRecoveryTriggerE =
         -- REPORT:ERROR 'reportOrLogE' somewhere in block retrieval.
@@ -275,18 +285,16 @@ dropRecoveryHeaderAndRepeat pm diffusion nodeId = do
 -- Returns only if blocks were successfully downloaded and
 -- processed. Throws exception if something goes wrong.
 getProcessBlocks
-    :: forall ctx m.
-       ( BlockWorkMode ctx m
-       , HasMisbehaviorMetrics ctx
-       )
-    => ProtocolMagic
+    :: forall ctx m
+     . (BlockWorkMode ctx m, HasMisbehaviorMetrics ctx)
+    => Core.Config
     -> TxpConfiguration
     -> Diffusion m
     -> NodeId
     -> HeaderHash
     -> [HeaderHash]
     -> m ()
-getProcessBlocks pm txpConfig diffusion nodeId desired checkpoints = do
+getProcessBlocks coreConfig txpConfig diffusion nodeId desired checkpoints = do
     result <- Diffusion.getBlocks diffusion nodeId desired checkpoints
     case OldestFirst <$> nonEmpty (getOldestFirst result) of
       Nothing -> do
@@ -299,7 +307,7 @@ getProcessBlocks pm txpConfig diffusion nodeId desired checkpoints = do
           logDebug $ sformat
               ("Retrieved "%int%" blocks")
               (blocks ^. _OldestFirst . to NE.length)
-          handleBlocks pm txpConfig blocks diffusion
+          handleBlocks coreConfig txpConfig blocks diffusion
           -- If we've downloaded any block with bigger
           -- difficulty than ncRecoveryHeader, we're
           -- gracefully exiting recovery mode.
@@ -321,24 +329,22 @@ getProcessBlocks pm txpConfig diffusion nodeId desired checkpoints = do
 -- Will fall back to getProcessBlocks if streaming is disabled
 -- or not supported by peer.
 streamProcessBlocks
-    :: forall ctx m.
-       ( BlockWorkMode ctx m
-       , HasMisbehaviorMetrics ctx
-       )
-    => ProtocolMagic
+    :: forall ctx m
+     . (BlockWorkMode ctx m, HasMisbehaviorMetrics ctx)
+    => Core.Config
     -> TxpConfiguration
     -> Diffusion m
     -> NodeId
     -> HeaderHash
     -> [HeaderHash]
     -> m ()
-streamProcessBlocks pm txpConfig diffusion nodeId desired checkpoints = do
+streamProcessBlocks coreConfig txpConfig diffusion nodeId desired checkpoints = do
     logInfo "streaming start"
     r <- Diffusion.streamBlocks diffusion nodeId desired checkpoints writeCallback
     case r of
          Nothing -> do
              logInfo "streaming not supported, reverting to batch mode"
-             getProcessBlocks pm txpConfig diffusion nodeId desired checkpoints
+             getProcessBlocks coreConfig txpConfig diffusion nodeId desired checkpoints
          Just _  -> do
              logInfo "streaming done"
              return ()
@@ -346,4 +352,4 @@ streamProcessBlocks pm txpConfig diffusion nodeId desired checkpoints = do
     writeCallback :: [Block] -> m ()
     writeCallback [] = return ()
     writeCallback (block:blocks) =
-        handleBlocks pm txpConfig (OldestFirst (NE.reverse $ block :| blocks)) diffusion
+        handleBlocks coreConfig txpConfig (OldestFirst (NE.reverse $ block :| blocks)) diffusion

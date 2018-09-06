@@ -1,4 +1,5 @@
-{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE TypeOperators   #-}
 
 -- | Logic for global processing of transactions.  Global transaction
 -- is a transaction which has already been added to the blockchain.
@@ -29,10 +30,11 @@ import           Pos.Chain.Txp (ExtendedGlobalToilM, GlobalToilEnv (..),
                      UtxoModifier, applyToil, defGlobalToilState,
                      flattenTxPayload, gtsUtxoModifier, rollbackToil,
                      runGlobalToilMBase, runUtxoM, utxoToLookup, verifyToil)
-import           Pos.Core (HasCoreConfiguration, HasGenesisData, ProtocolMagic,
-                     epochIndexL)
+import           Pos.Core as Core (Config (..), HasCoreConfiguration,
+                     ProtocolMagic, configBootStakeholders, epochIndexL)
 import           Pos.Core.Chrono (NE, NewestFirst (..), OldestFirst (..))
 import           Pos.Core.Exception (assertionFailed)
+import           Pos.Core.Genesis (GenesisWStakeholders)
 import           Pos.Core.Txp (TxAux, TxUndo, TxpUndo)
 import           Pos.DB (SomeBatchOp (..))
 import           Pos.DB.Class (gsAdoptedBVData)
@@ -52,13 +54,18 @@ import qualified Pos.Util.Modifier as MM
 
 -- | Settings used for global transactions data processing used by a
 -- simple full node.
-txpGlobalSettings :: HasGenesisData => ProtocolMagic -> TxpConfiguration -> TxpGlobalSettings
-txpGlobalSettings pm txpConfig =
-    TxpGlobalSettings
-    { tgsVerifyBlocks = verifyBlocks pm txpConfig
-    , tgsApplyBlocks = applyBlocksWith pm txpConfig (processBlundsSettings False applyToil)
-    , tgsRollbackBlocks = rollbackBlocks
+txpGlobalSettings :: Core.Config -> TxpConfiguration -> TxpGlobalSettings
+txpGlobalSettings coreConfig txpConfig = TxpGlobalSettings
+    { tgsVerifyBlocks   = verifyBlocks pm txpConfig
+    , tgsApplyBlocks    = applyBlocksWith
+        pm
+        txpConfig
+        (processBlundsSettings False $ applyToil bootStakeholders)
+    , tgsRollbackBlocks = rollbackBlocks bootStakeholders
     }
+  where
+    pm               = configProtocolMagic coreConfig
+    bootStakeholders = configBootStakeholders coreConfig
 
 ----------------------------------------------------------------------------
 -- Verify
@@ -197,10 +204,12 @@ processBlundsSettings isRollback pureAction =
 
 rollbackBlocks ::
        forall m. (TxpGlobalRollbackMode m)
-    => NewestFirst NE TxpBlund
+    => GenesisWStakeholders
+    -> NewestFirst NE TxpBlund
     -> m SomeBatchOp
-rollbackBlocks (NewestFirst blunds) =
-    processBlunds (processBlundsSettings True rollbackToil) blunds
+rollbackBlocks bootStakeholders (NewestFirst blunds) = processBlunds
+    (processBlundsSettings True (rollbackToil bootStakeholders))
+    blunds
 
 ----------------------------------------------------------------------------
 -- Helpers

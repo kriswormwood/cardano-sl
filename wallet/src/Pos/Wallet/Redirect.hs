@@ -24,17 +24,16 @@ import           Universum hiding (id)
 import           Control.Lens (views)
 import qualified Data.HashMap.Strict as HM
 import           Data.Time.Units (Millisecond)
-import           System.Wlog (WithLogger, logWarning)
 
 import           Pos.Chain.Block (BlockHeader, LastKnownHeaderTag,
                      MonadLastKnownHeader)
 import           Pos.Chain.Txp (ToilVerFailure, TxpConfiguration)
 import           Pos.Chain.Update (ConfirmedProposalState)
 import qualified Pos.Context as PC
-import           Pos.Core (ChainDifficulty, HasConfiguration, Timestamp,
-                     difficultyL, getCurrentTimestamp)
+import           Pos.Core as Core (ChainDifficulty, Config, HasConfiguration,
+                     Timestamp, difficultyL, getCurrentTimestamp)
 import           Pos.Core.Txp (Tx, TxAux (..), TxId, TxUndo)
-import           Pos.Crypto (ProtocolMagic, WithHash (..))
+import           Pos.Crypto (WithHash (..))
 import qualified Pos.DB.BlockIndex as DB
 import           Pos.DB.Class (MonadDBRead)
 import qualified Pos.DB.GState.Common as GS
@@ -45,14 +44,15 @@ import           Pos.DB.Update (UpdateContext (ucDownloadedUpdate))
 import           Pos.Infra.Shutdown (HasShutdownContext, triggerShutdown)
 import           Pos.Infra.Slotting (MonadSlots (..), getNextEpochSlotDuration)
 import           Pos.Util.Util (HasLens (..))
+import           Pos.Util.Wlog (WithLogger, logWarning)
 import           Pos.Wallet.WalletMode (MonadBlockchainInfo (..),
                      MonadUpdates (..))
-import           Pos.Wallet.Web.Account (AccountMode, getSKById)
+import           Pos.Wallet.Web.Account (AccountMode, getKeyById)
 import           Pos.Wallet.Web.ClientTypes (CId, Wal)
 import           Pos.Wallet.Web.Methods.History (addHistoryTxMeta)
 import qualified Pos.Wallet.Web.State as WS
 import           Pos.Wallet.Web.Tracking (THEntryExtra, buildTHEntryExtra,
-                     eskToWalletDecrCredentials, isTxEntryInteresting)
+                     isTxEntryInteresting, keyToWalletDecrCredentials)
 
 ----------------------------------------------------------------------------
 -- BlockchainInfo
@@ -134,13 +134,13 @@ txpProcessTxWebWallet
     , AccountMode ctx m
     , WS.WalletDbReader ctx m
     )
-    => ProtocolMagic
+    => Core.Config
     -> TxpConfiguration
     -> (TxId, TxAux)
     -> m (Either ToilVerFailure ())
-txpProcessTxWebWallet pm txpConfig tx@(txId, txAux) = do
+txpProcessTxWebWallet coreConfig txpConfig tx@(txId, txAux) = do
     db <- WS.askWalletDB
-    txProcessTransaction pm txpConfig tx >>= traverse (const $ addTxToWallets db)
+    txProcessTransaction coreConfig txpConfig tx >>= traverse (const $ addTxToWallets db)
   where
     addTxToWallets :: WS.WalletDB -> m ()
     addTxToWallets db = do
@@ -158,14 +158,14 @@ txpProcessTxWebWallet pm txpConfig tx@(txId, txAux) = do
 
     toThee :: (WithHash Tx, TxUndo) -> Timestamp -> CId Wal -> m (CId Wal, THEntryExtra)
     toThee txWithUndo ts wId = do
-        wdc <- eskToWalletDecrCredentials <$> getSKById wId
-        pure (wId, buildTHEntryExtra wdc txWithUndo (Nothing, Just ts))
+        credentials <- keyToWalletDecrCredentials <$> getKeyById wId
+        pure (wId, buildTHEntryExtra credentials txWithUndo (Nothing, Just ts))
 
 txpNormalizeWebWallet
     :: ( TxpLocalWorkMode ctx m
        , MempoolExt m ~ ()
        )
-    => ProtocolMagic
+    => Core.Config
     -> TxpConfiguration
     -> m ()
 txpNormalizeWebWallet = txNormalize

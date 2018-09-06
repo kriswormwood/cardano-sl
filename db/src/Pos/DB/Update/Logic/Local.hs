@@ -1,3 +1,5 @@
+{-# LANGUAGE RecordWildCards #-}
+
 -- | Logic of local data processing in Update System.
 
 module Pos.DB.Update.Logic.Local
@@ -29,7 +31,6 @@ import           Data.Default (Default (def))
 import qualified Data.HashMap.Strict as HM
 import qualified Data.HashSet as HS
 import           Formatting (sformat, (%))
-import           System.Wlog (WithLogger, logWarning)
 import           UnliftIO (MonadUnliftIO)
 
 import           Pos.Binary.Class (biSize)
@@ -40,7 +41,7 @@ import           Pos.Chain.Update (HasUpdateConfiguration,
                      PollVerFailure (..), canCombineVotes, evalPollT,
                      execPollT, getAdoptedBV, modifyPollModifier, psVotes,
                      reportUnexpectedError, runPollT)
-import           Pos.Core (ProtocolMagic, SlotId (..), slotIdF)
+import           Pos.Core as Core (Config, SlotId (..), slotIdF)
 import           Pos.Core.Reporting (MonadReporting)
 import           Pos.Core.Update (BlockVersionData (..), UpId,
                      UpdatePayload (..), UpdateProposal, UpdateVote (..))
@@ -59,6 +60,7 @@ import           Pos.DB.Update.Poll.Logic.Apply (verifyAndApplyUSPayload)
 import           Pos.DB.Update.Poll.Logic.Normalize (filterProposalsByThd,
                      normalizePoll, refreshPoll)
 import           Pos.Util.Util (HasLens (..), HasLens')
+import           Pos.Util.Wlog (WithLogger, logWarning)
 
 type USLocalLogicMode ctx m =
     ( MonadIO m
@@ -126,10 +128,10 @@ processSkeleton ::
        ( USLocalLogicModeWithLock ctx m
        , MonadReporting m
        )
-    => ProtocolMagic
+    => Core.Config
     -> UpdatePayload
     -> m (Either PollVerFailure ())
-processSkeleton pm payload =
+processSkeleton coreConfig payload =
     reportUnexpectedError $
     withUSLock $
     runExceptT $
@@ -156,7 +158,7 @@ processSkeleton pm payload =
         modifierOrFailure <-
             lift . runDBPoll . runExceptT . evalPollT msModifier . execPollT def $ do
                 lastAdopted <- getAdoptedBV
-                verifyAndApplyUSPayload pm lastAdopted True (Left msSlot) payload
+                verifyAndApplyUSPayload coreConfig lastAdopted True (Left msSlot) payload
         case modifierOrFailure of
             Left failure -> throwError failure
             Right modifier -> do
@@ -216,11 +218,12 @@ getLocalProposalNVotes id = do
 -- Otherwise 'Left err' is returned and 'err' lets caller decide whether
 -- sender could be sure that error would happen.
 processProposal
-    :: ( USLocalLogicModeWithLock ctx m
-       , MonadReporting m
-       )
-    => ProtocolMagic -> UpdateProposal -> m (Either PollVerFailure ())
-processProposal pm proposal = processSkeleton pm $ UpdatePayload (Just proposal) []
+    :: (USLocalLogicModeWithLock ctx m, MonadReporting m)
+    => Core.Config
+    -> UpdateProposal
+    -> m (Either PollVerFailure ())
+processProposal coreConfig proposal =
+    processSkeleton coreConfig $ UpdatePayload (Just proposal) []
 
 ----------------------------------------------------------------------------
 -- Votes
@@ -267,11 +270,12 @@ getLocalVote propId pk decision = do
 -- Otherwise 'Left err' is returned and 'err' lets caller decide whether
 -- sender could be sure that error would happen.
 processVote
-    :: ( USLocalLogicModeWithLock ctx m
-       , MonadReporting m
-       )
-    => ProtocolMagic -> UpdateVote -> m (Either PollVerFailure ())
-processVote pm vote = processSkeleton pm $ UpdatePayload Nothing [vote]
+    :: (USLocalLogicModeWithLock ctx m, MonadReporting m)
+    => Core.Config
+    -> UpdateVote
+    -> m (Either PollVerFailure ())
+processVote coreConfig vote =
+    processSkeleton coreConfig $ UpdatePayload Nothing [vote]
 
 ----------------------------------------------------------------------------
 -- Normalization and related

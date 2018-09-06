@@ -31,13 +31,13 @@ import qualified Database.RocksDB as Rocks
 import           Formatting (bprint, sformat, (%))
 import qualified Formatting.Buildable
 import           Serokell.Util (Color (Red), colorize)
-import           System.Wlog (WithLogger, logError)
 import           UnliftIO (MonadUnliftIO)
 
-import           Pos.Chain.Txp (GenesisUtxo (..), utxoToStakes)
+import           Pos.Chain.Txp (genesisStakes)
 import           Pos.Core (Coin, HasCoreConfiguration, StakeholderId, StakesMap,
                      coinF, mkCoin, sumCoins, unsafeAddCoin,
                      unsafeIntegerToCoin)
+import           Pos.Core.Genesis (GenesisData (..))
 import           Pos.Crypto (shortHashF)
 import           Pos.DB (DBError (..), DBTag (GStateDB), IterType, MonadDB,
                      MonadDBRead, RocksBatchOp (..), dbIterSource,
@@ -45,6 +45,7 @@ import           Pos.DB (DBError (..), DBTag (GStateDB), IterType, MonadDB,
 import           Pos.DB.GState.Common (gsPutBi)
 import           Pos.DB.GState.Stakes (StakeIter, ftsStakeKey, ftsSumKey,
                      getRealTotalStake)
+import           Pos.Util.Wlog (WithLogger, logError)
 
 ----------------------------------------------------------------------------
 -- Operations
@@ -70,18 +71,18 @@ instance HasCoreConfiguration => RocksBatchOp StakesOp where
 -- Initialization
 ----------------------------------------------------------------------------
 
-initGStateStakes :: MonadDB m => GenesisUtxo -> m ()
-initGStateStakes (GenesisUtxo genesisUtxo) = do
+initGStateStakes :: MonadDB m => GenesisData -> m ()
+initGStateStakes genesisData = do
     putFtsStakes
     putGenesisTotalStake
   where
     putTotalFtsStake = gsPutBi ftsSumKey
-    genesisStakes = utxoToStakes genesisUtxo
-    totalCoins = sumCoins genesisStakes
+    stakes = genesisStakes genesisData
+    totalCoins = sumCoins stakes
     -- Will 'error' if the result doesn't fit into 'Coin' (which should never
     -- happen)
     putGenesisTotalStake = putTotalFtsStake (unsafeIntegerToCoin totalCoins)
-    putFtsStakes = mapM_ (uncurry putFtsStake) . HM.toList $ genesisStakes
+    putFtsStakes = mapM_ (uncurry putFtsStake) $ HM.toList stakes
 
 ----------------------------------------------------------------------------
 -- Iteration

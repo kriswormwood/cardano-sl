@@ -145,7 +145,6 @@ library
                       , iproute
                       , kademlia
                       , lens
-                      , log-warper >= 1.0.3
                       , mtl
                       , network-info
                       , network-transport
@@ -184,7 +183,6 @@ library
                        DefaultSignatures
                        NoImplicitPrelude
                        OverloadedStrings
-                       RecordWildCards
                        TypeApplications
                        TupleSections
                        ViewPatterns

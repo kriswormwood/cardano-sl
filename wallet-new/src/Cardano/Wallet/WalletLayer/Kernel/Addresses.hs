@@ -19,11 +19,8 @@ import           Cardano.Wallet.API.Response (SliceOf (..))
 import           Cardano.Wallet.API.V1.Types (V1 (..), WalletAddress (..))
 import qualified Cardano.Wallet.API.V1.Types as V1
 import qualified Cardano.Wallet.Kernel.Addresses as Kernel
+import           Cardano.Wallet.Kernel.DB.AcidState (dbHdWallets)
 import qualified Cardano.Wallet.Kernel.DB.HdWallet as HD
-import           Cardano.Wallet.Kernel.DB.HdWallet.Read
-                     (readAddressesByAccountId, readAllHdAccounts,
-                     readAllHdAddresses, readHdAddressByCardanoAddress)
-import           Cardano.Wallet.Kernel.DB.Read (hdWallets)
 import           Cardano.Wallet.Kernel.DB.Util.IxSet (AutoIncrementKey (..),
                      Indexed (..), IxSet, ixedIndexed, (@>=<=))
 import qualified Cardano.Wallet.Kernel.DB.Util.IxSet as IxSet
@@ -96,16 +93,14 @@ createAddress wallet
 getAddresses :: RequestParams
              -> Kernel.DB
              -> SliceOf V1.WalletAddress
-getAddresses (rpPaginationParams -> PaginationParams{..}) db =
-    let (Page currentPage) = ppPage
-        (PerPage perPage)  = ppPerPage
-        -- The "pointer" where we should start.
-        globalStartAt = (currentPage - 1) * perPage
-        allAddrs      = readAllHdAddresses (hdWallets db)
-        totalEntries  = IxSet.size allAddrs
-        sliceOf = findResults db globalStartAt perPage
-        in SliceOf sliceOf totalEntries
-
+getAddresses (RequestParams (PaginationParams (Page p) (PerPage pp))) db =
+   let allAddrs = db ^. dbHdWallets . HD.hdWalletsAddresses
+       slice :: [V1.WalletAddress]
+       slice | p < 1 = []
+             | pp < 1 = []
+             | otherwise = let globalStart = (p - 1) * pp
+                           in findResults db globalStart pp
+   in SliceOf slice (IxSet.size allAddrs)
 
 -- | Finds the results needed by 'getAddresses'.
 findResults :: Kernel.DB
@@ -114,7 +109,7 @@ findResults :: Kernel.DB
             -> [V1.WalletAddress]
 findResults db globalStartIndex howMany =
     let -- The number of accounts is small enough to justify this conversion
-        accounts  = IxSet.toList $ readAllHdAccounts (hdWallets db)
+        accounts  = IxSet.toList $ db ^. dbHdWallets . HD.hdWalletsAccounts
     in takeIndexed db howMany [] . dropIndexed db globalStartIndex $ accounts
 
 
@@ -127,7 +122,7 @@ autoKey (Indexed ix1 _) (Indexed ix2 _) = compare ix1 ix2
 dropIndexed :: Kernel.DB -> Int -> [HD.HdAccount] -> (Int, [HD.HdAccount])
 dropIndexed _  n []     = (n, [])
 dropIndexed db n (a:as) =
-    let addresses = readAddressesOrDie db a
+    let addresses = readAddresses db a
         addrSize  = IxSet.size addresses
     in if addrSize < n
           then dropIndexed db (n - addrSize) as
@@ -144,42 +139,51 @@ takeIndexed db n acc (currentIndex, (a:as))
     | n < 0 = error "takeIndexed: invariant violated, n is negative."
     | n == 0 = acc
     | otherwise =
-        let addresses = readAddressesOrDie db a
+        let addresses = readAddresses db a
             addrSize  = IxSet.size addresses
             interval = ( AutoIncrementKey currentIndex
                        , AutoIncrementKey $
                            min (currentIndex + n - 1) (addrSize - 1)
                        )
             slice = addresses @>=<= interval
-            new = map (toV1 db) . sortBy autoKey . IxSet.toList $ slice
+            new = map (toV1 a) . sortBy autoKey . IxSet.toList $ slice
             in  -- For the next iterations, the index will always be 0 as we
                 -- are hopping from one ixset to the other, collecting addresses.
                 takeIndexed db (n - IxSet.size slice) (new <> acc) (0, as)
+  where
+    toV1 :: HD.HdAccount -> Indexed HD.HdAddress -> V1.WalletAddress
+    toV1 hdAccount ixed = toAddress hdAccount (ixed ^. ixedIndexed)
 
+readAddresses :: Kernel.DB -> HD.HdAccount -> IxSet (Indexed HD.HdAddress)
+readAddresses db hdAccount = Kernel.addressesByAccountId db (hdAccount ^. HD.hdAccountId)
 
-toV1 :: Kernel.DB -> Indexed HD.HdAddress -> V1.WalletAddress
-toV1 db ixed = toAddress db (ixed ^. ixedIndexed)
-
-
-readAddressesOrDie :: HasCallStack => Kernel.DB -> HD.HdAccount -> IxSet (Indexed HD.HdAddress)
-readAddressesOrDie db hdAccount =
-  case readAddressesByAccountId (hdAccount ^. HD.hdAccountId) (hdWallets db) of
-       Left _e -> error "readAddressesOrDie: the impossible happened, the DB might be corrupted."
-       Right addrs -> addrs
-
-
+-- | Validate an address
 validateAddress :: Text
                 -- ^ A raw fragment of 'Text' to validate.
                 -> Kernel.DB
                 -> Either ValidateAddressError V1.WalletAddress
-validateAddress rawText db =
-    case decodeTextAddress rawText of
-         Left _textualError -> Left (ValidateAddressDecodingFailed rawText)
-         Right cardanoAddress ->
-             case readHdAddressByCardanoAddress cardanoAddress (hdWallets db) of
-               Left _dbErr  -> Left (ValidateAddressNotOurs cardanoAddress)
-               Right hdAddress ->
-                   -- At this point, we need to construct a full 'WalletAddress',
-                   -- but we cannot do this without the knowledge on the
-                   -- underlying associated 'HdAddress'.
-                   Right $ toAddress db hdAddress
+validateAddress rawText db = runExcept $ do
+    cardanoAddress <- withExceptT (\_err -> ValidateAddressDecodingFailed rawText) $
+                        exceptT $ decodeTextAddress rawText
+    let mAddr = runExcept $ do
+          addr <- exceptT $
+                    Kernel.lookupCardanoAddress db
+                      cardanoAddress
+          acc  <- withExceptT HD.embedUnknownHdAccount $ exceptT $
+                    Kernel.lookupHdAccountId db
+                      (addr ^. HD.hdAddressId . HD.hdAddressIdParent)
+          return (addr, acc)
+    case mAddr of
+      Right (hdAddress, hdAccount) -> return $ toAddress hdAccount hdAddress
+      Left _unknownHdAddr ->
+        -- If the address is unknown to the wallet, it's possible that it's ours
+        -- but not yet used (at least as far as we know, it may be pending in
+        -- another instance of the same wallet of course), or it may be that
+        -- it's not even ours. In both cases we return that it is "not used"
+        -- (here) and "not a change address" (here). In the future we may want
+        -- to extend this endpoint with an "is ours" field.
+        return V1.WalletAddress {
+            addrId            = V1 cardanoAddress
+          , addrUsed          = False
+          , addrChangeAddress = False
+          }

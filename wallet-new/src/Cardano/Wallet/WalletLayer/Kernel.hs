@@ -1,3 +1,4 @@
+{-# LANGUAGE LambdaCase          #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications    #-}
 
@@ -9,28 +10,27 @@ module Cardano.Wallet.WalletLayer.Kernel
 import           Universum
 
 import qualified Control.Concurrent.STM as STM
-import           Data.Maybe (fromJust)
-import           System.Wlog (Severity (Debug))
 
-import           Pos.Chain.Block (Blund, Undo (..))
+import           Pos.Chain.Block (Blund)
 import qualified Pos.Core as Core
 import           Pos.Core.Chrono (OldestFirst (..))
+import           Pos.Util.Wlog (Severity (Debug))
 
 import qualified Cardano.Wallet.Kernel as Kernel
 import qualified Cardano.Wallet.Kernel.Actions as Actions
 import qualified Cardano.Wallet.Kernel.BListener as Kernel
-import           Cardano.Wallet.Kernel.DB.Resolved (ResolvedBlock)
 import           Cardano.Wallet.Kernel.Diffusion (WalletDiffusion (..))
 import           Cardano.Wallet.Kernel.Keystore (Keystore)
-import           Cardano.Wallet.Kernel.NodeStateAdaptor (NodeStateAdaptor)
+import           Cardano.Wallet.Kernel.NodeStateAdaptor
 import qualified Cardano.Wallet.Kernel.Read as Kernel
-import           Cardano.Wallet.Kernel.Types (RawResolvedBlock (..),
-                     fromRawResolvedBlock)
 import           Cardano.Wallet.WalletLayer (ActiveWalletLayer (..),
                      PassiveWalletLayer (..))
 import qualified Cardano.Wallet.WalletLayer.Kernel.Accounts as Accounts
 import qualified Cardano.Wallet.WalletLayer.Kernel.Active as Active
 import qualified Cardano.Wallet.WalletLayer.Kernel.Addresses as Addresses
+import qualified Cardano.Wallet.WalletLayer.Kernel.Info as Info
+import qualified Cardano.Wallet.WalletLayer.Kernel.Internal as Internal
+import qualified Cardano.Wallet.WalletLayer.Kernel.Settings as Settings
 import qualified Cardano.Wallet.WalletLayer.Kernel.Transactions as Transactions
 import qualified Cardano.Wallet.WalletLayer.Kernel.Wallets as Wallets
 
@@ -38,17 +38,20 @@ import qualified Cardano.Wallet.WalletLayer.Kernel.Wallets as Wallets
 -- The passive wallet cannot send new transactions.
 bracketPassiveWallet
     :: forall m n a. (MonadIO n, MonadIO m, MonadMask m)
-    => (Severity -> Text -> IO ())
+    => Kernel.DatabaseMode
+    -> (Severity -> Text -> IO ())
     -> Keystore
     -> NodeStateAdaptor IO
     -> (PassiveWalletLayer n -> Kernel.PassiveWallet -> m a) -> m a
-bracketPassiveWallet logFunction keystore rocksDB f =
-    Kernel.bracketPassiveWallet logFunction keystore rocksDB $ \w -> do
+bracketPassiveWallet mode logFunction keystore node f = do
+    Kernel.bracketPassiveWallet mode logFunction keystore node $ \w -> do
       let wai = Actions.WalletActionInterp
-                 { Actions.applyBlocks = \blunds ->
-                     Kernel.applyBlocks w
-                        (OldestFirst (mapMaybe blundToResolvedBlock
-                           (toList (getOldestFirst blunds))))
+                 { Actions.applyBlocks = \blunds -> do
+                    ls <- mapM (Wallets.blundToResolvedBlock node)
+                        (toList (getOldestFirst blunds))
+                    let mp = catMaybes ls
+                    -- TODO: Deal with ApplyBlockFailed
+                    mapM_ (Kernel.applyBlock w) mp
                  , Actions.switchToFork = \_ _ ->
                      logFunction Debug "<switchToFork>"
                  , Actions.emit = logFunction Debug }
@@ -60,25 +63,35 @@ bracketPassiveWallet logFunction keystore rocksDB f =
                        -> PassiveWalletLayer n
     passiveWalletLayer w invoke = PassiveWalletLayer
         { -- Operations that modify the wallet
-          _pwlCreateWallet         = Wallets.createWallet         w
-        , _pwlUpdateWallet         = Wallets.updateWallet         w
-        , _pwlUpdateWalletPassword = Wallets.updateWalletPassword w
-        , _pwlDeleteWallet         = Wallets.deleteWallet         w
-        , _pwlCreateAccount        = Accounts.createAccount       w
-        , _pwlUpdateAccount        = Accounts.updateAccount       w
-        , _pwlDeleteAccount        = Accounts.deleteAccount       w
-        , _pwlCreateAddress        = Addresses.createAddress      w
-        , _pwlApplyBlocks          = invokeIO . Actions.ApplyBlocks
-        , _pwlRollbackBlocks       = invokeIO . Actions.RollbackBlocks
+          createWallet         = Wallets.createWallet         w
+        , updateWallet         = Wallets.updateWallet         w
+        , updateWalletPassword = Wallets.updateWalletPassword w
+        , deleteWallet         = Wallets.deleteWallet         w
+        , createAccount        = Accounts.createAccount       w
+        , updateAccount        = Accounts.updateAccount       w
+        , deleteAccount        = Accounts.deleteAccount       w
+        , createAddress        = Addresses.createAddress      w
+        , nextUpdate           = Internal.nextUpdate          w
+        , applyUpdate          = Internal.applyUpdate         w
+        , postponeUpdate       = Internal.postponeUpdate      w
+        , resetWalletState     = Internal.resetWalletState    w
+        , importWallet         = Internal.importWallet        w
+        , applyBlocks          = invokeIO . Actions.ApplyBlocks
+        , rollbackBlocks       = invokeIO . Actions.RollbackBlocks . length
+
           -- Read-only operations
-        , _pwlGetWallets           =             ro $ Wallets.getWallets
-        , _pwlGetWallet            = \wId     -> ro $ Wallets.getWallet    wId
-        , _pwlGetAccounts          = \wId     -> ro $ Accounts.getAccounts wId
-        , _pwlGetAccount           = \wId acc -> ro $ Accounts.getAccount  wId acc
-        , _pwlGetAddresses         = \rp      -> ro $ Addresses.getAddresses rp
-        , _pwlValidateAddress      = \txt     -> ro $ Addresses.validateAddress txt
-        , _pwlGetTransactions      = Transactions.getTransactions w
-        , _pwlGetTxFromMeta        = Transactions.toTransaction w
+        , getWallets           =                   join (ro $ Wallets.getWallets w)
+        , getWallet            = \wId           -> join (ro $ Wallets.getWallet w wId)
+        , getUtxos             = \wId           -> ro $ Wallets.getWalletUtxos wId
+        , getAccounts          = \wId           -> ro $ Accounts.getAccounts         wId
+        , getAccount           = \wId acc       -> ro $ Accounts.getAccount          wId acc
+        , getAccountBalance    = \wId acc       -> ro $ Accounts.getAccountBalance   wId acc
+        , getAccountAddresses  = \wId acc rp fo -> ro $ Accounts.getAccountAddresses wId acc rp fo
+        , getAddresses         = \rp            -> ro $ Addresses.getAddresses rp
+        , validateAddress      = \txt           -> ro $ Addresses.validateAddress txt
+        , getTransactions      = Transactions.getTransactions w
+        , getTxFromMeta        = Transactions.toTransaction w
+        , getNodeSettings      = Settings.getNodeSettings w
         }
       where
         -- Read-only operations
@@ -87,17 +100,6 @@ bracketPassiveWallet logFunction keystore rocksDB f =
 
         invokeIO :: forall m'. MonadIO m' => Actions.WalletAction Blund -> m' ()
         invokeIO = liftIO . STM.atomically . invoke
-
-    -- The use of the unsafe constructor 'UnsafeRawResolvedBlock' is justified
-    -- by the invariants established in the 'Blund'.
-    blundToResolvedBlock :: Blund -> Maybe ResolvedBlock
-    blundToResolvedBlock (b,u)
-        = rightToJust b <&> \mainBlock ->
-            fromRawResolvedBlock $
-              UnsafeRawResolvedBlock mainBlock spentOutputs'
-        where
-            spentOutputs' = map (map fromJust) $ undoTx u
-            rightToJust   = either (const Nothing) Just
 
 -- | Initialize the active wallet.
 -- The active wallet is allowed to send transactions, as it has the full
@@ -122,4 +124,5 @@ bracketActiveWallet pm walletPassiveLayer passiveWallet walletDiffusion runActiv
         , pay                = Active.pay          w
         , estimateFees       = Active.estimateFees w
         , redeemAda          = Active.redeemAda    w
+        , getNodeInfo        = Info.getNodeInfo    w
         }

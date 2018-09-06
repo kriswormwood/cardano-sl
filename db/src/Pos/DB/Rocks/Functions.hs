@@ -1,4 +1,5 @@
-{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE RankNTypes      #-}
+{-# LANGUAGE RecordWildCards #-}
 
 -- | Functions related to rocksdb implementation of database
 -- interface.
@@ -77,6 +78,7 @@ openNodeDBs recreate fp = do
     let blocksDir = fp </> "blocks"
     let blocksIndexPath = blocksDir </> "index"
     let _blockDataDir = blocksDir </> "data"
+    let _epochDataDir = fp </> "epochs"
     let gStatePath = fp </> "gState"
     let lrcPath = fp </> "lrc"
     let miscPath = fp </> "misc"
@@ -84,6 +86,7 @@ openNodeDBs recreate fp = do
         [ blocksDir
         , _blockDataDir
         , blocksIndexPath
+        , _epochDataDir
         , gStatePath
         , lrcPath
         , miscPath
@@ -92,7 +95,7 @@ openNodeDBs recreate fp = do
     _gStateDB <- openRocksDB gStatePath
     _lrcDB <- openRocksDB lrcPath
     _miscDB <- openRocksDB miscPath
-    _miscLock <- RWL.new
+    _epochLock <- RWL.new
     pure NodeDBs {..}
   where
     ensureDirectoryExists :: MonadIO m => FilePath -> m ()

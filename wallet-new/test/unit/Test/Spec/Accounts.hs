@@ -12,23 +12,24 @@ import qualified Test.Spec.Wallets as Wallets
 
 import           Formatting (build, formatToString, (%))
 
-import           Cardano.Wallet.Kernel.Accounts (CreateAccountError (..))
-import qualified Cardano.Wallet.Kernel.DB.HdWallet as Kernel
-import qualified Cardano.Wallet.Kernel.Internal as Internal
-import qualified Cardano.Wallet.Kernel.Keystore as Keystore
-import           Cardano.Wallet.WalletLayer (PassiveWalletLayer)
-import qualified Cardano.Wallet.WalletLayer as WalletLayer
-
 import qualified Cardano.Wallet.API.Request as API
 import qualified Cardano.Wallet.API.Request.Pagination as API
 import qualified Cardano.Wallet.API.Response as API
 import           Cardano.Wallet.API.V1.Handlers.Accounts as Handlers
 import           Cardano.Wallet.API.V1.Types (V1 (..))
 import qualified Cardano.Wallet.API.V1.Types as V1
+import           Cardano.Wallet.Kernel.Accounts (CreateAccountError (..))
+import qualified Cardano.Wallet.Kernel.DB.HdWallet as Kernel
 import qualified Cardano.Wallet.Kernel.DB.Util.IxSet as IxSet
+import qualified Cardano.Wallet.Kernel.Internal as Internal
+import qualified Cardano.Wallet.Kernel.Keystore as Keystore
+import           Cardano.Wallet.WalletLayer (PassiveWalletLayer)
+import qualified Cardano.Wallet.WalletLayer as WalletLayer
 import qualified Cardano.Wallet.WalletLayer.Kernel.Wallets as Wallets
 import           Control.Monad.Except (runExceptT)
 import           Servant.Server
+
+import           Pos.Core.Common (mkCoin)
 
 import           Test.Spec.Fixture (GenPassiveWalletFixture,
                      genSpendingPassword, withLayer, withPassiveWalletFixture)
@@ -50,7 +51,7 @@ genNewAccountRq spendingPassword = do
 prepareFixtures :: GenPassiveWalletFixture Fixture
 prepareFixtures = do
     spendingPassword <- genSpendingPassword
-    newWalletRq <- Wallets.genNewWalletRq spendingPassword
+    newWalletRq <- WalletLayer.CreateWallet <$> Wallets.genNewWalletRq spendingPassword
     newAccountRq <- genNewAccountRq spendingPassword
     return $ \pw -> do
         res <- Wallets.createWallet pw newWalletRq
@@ -76,9 +77,9 @@ spec = describe "Accounts" $ do
         prop "works as expected in the happy path scenario" $ withMaxSuccess 50 $ do
             monadicIO $ do
                 withFixture $ \_ layer _ Fixture{..} -> do
-                    res <- (WalletLayer._pwlCreateAccount layer)
-                           (V1.walId fixtureV1Wallet)
-                           fixtureNewAccountRq
+                    res <- WalletLayer.createAccount layer
+                             (V1.walId fixtureV1Wallet)
+                             fixtureNewAccountRq
                     (bimap STB STB res) `shouldSatisfy` isRight
 
         prop "fails if the parent wallet doesn't exists" $ withMaxSuccess 50 $ do
@@ -87,7 +88,7 @@ spec = describe "Accounts" $ do
                 pwd <- genSpendingPassword
                 request <- genNewAccountRq pwd
                 withLayer $ \layer _ -> do
-                    res <- (WalletLayer._pwlCreateAccount layer) wId request
+                    res <- WalletLayer.createAccount layer wId request
                     case res of
                          Left (WalletLayer.CreateAccountError (CreateAccountKeystoreNotFound _)) ->
                              return ()
@@ -114,16 +115,16 @@ spec = describe "Accounts" $ do
                 withFixture $ \_ layer _ Fixture{..} -> do
                     let wId = V1.walId fixtureV1Wallet
                     (Right V1.Account{..}) <-
-                        (WalletLayer._pwlCreateAccount layer)
-                            wId fixtureNewAccountRq
-                    res <- (WalletLayer._pwlDeleteAccount layer) wId accIndex
+                        WalletLayer.createAccount layer wId fixtureNewAccountRq
+                    res <- WalletLayer.deleteAccount layer wId accIndex
                     (bimap STB STB res) `shouldSatisfy` isRight
 
         prop "fails if the parent wallet doesn't exists" $ withMaxSuccess 50 $ do
             monadicIO $ do
                 wId <- pick arbitrary
                 withLayer $ \layer _ -> do
-                    res <- (WalletLayer._pwlDeleteAccount layer) wId 100
+                    res <- WalletLayer.deleteAccount layer wId
+                             (V1.unsafeMkAccountIndex 2147483648)
                     case res of
                          Left (WalletLayer.DeleteAccountError
                                   (V1 (Kernel.UnknownHdAccountRoot _))) ->
@@ -139,7 +140,9 @@ spec = describe "Accounts" $ do
         prop "fails if the account doesn't exists" $ withMaxSuccess 50 $ do
             monadicIO $ do
                 withFixture $ \_ layer _ Fixture{..} -> do
-                    res <- (WalletLayer._pwlDeleteAccount layer) (V1.walId fixtureV1Wallet) 100
+                    res <- WalletLayer.deleteAccount layer
+                             (V1.walId fixtureV1Wallet)
+                             (V1.unsafeMkAccountIndex 2147483648)
                     case res of
                          Left (WalletLayer.DeleteAccountError
                                   (V1 (Kernel.UnknownHdAccount _))) ->
@@ -170,7 +173,9 @@ spec = describe "Accounts" $ do
             monadicIO $ do
                 wId <- pick arbitrary
                 withLayer $ \layer _ -> do
-                    let delete = Handlers.deleteAccount layer wId 100
+                    let delete = Handlers.deleteAccount layer
+                            wId
+                            (V1.unsafeMkAccountIndex 2147483648)
                     res <- try . runExceptT . runHandler' $ delete
                     case res of
                          Left (_e :: WalletLayer.DeleteAccountError)  -> return ()
@@ -180,7 +185,10 @@ spec = describe "Accounts" $ do
         prop "Servant handler fails if the account doesn't exist" $ withMaxSuccess 50 $ do
             monadicIO $ do
                 withFixture $ \_ layer _ Fixture{..} -> do
-                    let delete = Handlers.deleteAccount layer (V1.walId fixtureV1Wallet) 100
+                    let delete =
+                            Handlers.deleteAccount layer
+                                (V1.walId fixtureV1Wallet)
+                                (V1.unsafeMkAccountIndex 2147483648)
                     res <- try . runExceptT . runHandler' $ delete
                     case res of
                          Left (_e :: WalletLayer.DeleteAccountError)  -> return ()
@@ -194,10 +202,9 @@ spec = describe "Accounts" $ do
                 withFixture $ \_ layer _ Fixture{..} -> do
                     let wId = V1.walId fixtureV1Wallet
                     (Right V1.Account{..}) <-
-                        (WalletLayer._pwlCreateAccount layer)
-                            wId fixtureNewAccountRq
+                        WalletLayer.createAccount layer wId fixtureNewAccountRq
                     let updateAccountRq = V1.AccountUpdate "My nice account"
-                    res <- (WalletLayer._pwlUpdateAccount layer) wId accIndex updateAccountRq
+                    res <- WalletLayer.updateAccount layer wId accIndex updateAccountRq
                     case res of
                          Left e -> fail (show e)
                          Right updatedAccount ->
@@ -207,7 +214,10 @@ spec = describe "Accounts" $ do
             monadicIO $ do
                 wId <- pick arbitrary
                 withLayer $ \layer _ -> do
-                    res <- (WalletLayer._pwlUpdateAccount layer) wId 100 (V1.AccountUpdate "new account")
+                    res <- WalletLayer.updateAccount layer
+                             wId
+                             (V1.unsafeMkAccountIndex 2147483648)
+                             (V1.AccountUpdate "new account")
                     case res of
                          Left (WalletLayer.UpdateAccountError
                                 (V1 (Kernel.UnknownHdAccountRoot _))) ->
@@ -224,7 +234,10 @@ spec = describe "Accounts" $ do
             monadicIO $ do
                 withFixture $ \_ layer _ Fixture{..} -> do
                     let wId = V1.walId fixtureV1Wallet
-                    res <- (WalletLayer._pwlUpdateAccount layer) wId 100 (V1.AccountUpdate "new account")
+                    res <- WalletLayer.updateAccount layer
+                             wId
+                             (V1.unsafeMkAccountIndex 2147483648)
+                             (V1.AccountUpdate "new account")
                     case res of
                          Left (WalletLayer.UpdateAccountError
                                 (V1 (Kernel.UnknownHdAccount _))) ->
@@ -256,10 +269,10 @@ spec = describe "Accounts" $ do
             monadicIO $ do
                 withFixture $ \_ layer _ Fixture{..} -> do
                     (Right V1.Account{..}) <-
-                        (WalletLayer._pwlCreateAccount layer) (V1.walId fixtureV1Wallet)
-                                                              fixtureNewAccountRq
-                    res <- (WalletLayer._pwlGetAccount layer) (V1.walId fixtureV1Wallet)
-                                                              accIndex
+                        WalletLayer.createAccount layer (V1.walId fixtureV1Wallet)
+                                                        fixtureNewAccountRq
+                    res <- WalletLayer.getAccount layer (V1.walId fixtureV1Wallet)
+                                                        accIndex
                     case res of
                          Left e    -> fail (show e)
                          Right acc -> V1.accIndex acc `shouldBe` accIndex
@@ -268,7 +281,9 @@ spec = describe "Accounts" $ do
             monadicIO $ do
                 wId <- pick arbitrary
                 withLayer $ \layer _ -> do
-                    res <- (WalletLayer._pwlGetAccount layer) wId 100
+                    res <- WalletLayer.getAccount layer
+                             wId
+                             (V1.unsafeMkAccountIndex 2147483648)
                     case res of
                          Left (WalletLayer.GetAccountError (V1 (Kernel.UnknownHdAccountRoot _))) ->
                              return ()
@@ -283,7 +298,9 @@ spec = describe "Accounts" $ do
         prop "fails if the account doesn't exists" $ withMaxSuccess 50 $ do
             monadicIO $ do
                 withFixture $ \_ layer _ Fixture{..} -> do
-                    res <- (WalletLayer._pwlGetAccount layer) (V1.walId fixtureV1Wallet) 100
+                    res <- WalletLayer.getAccount layer
+                             (V1.walId fixtureV1Wallet)
+                             (V1.unsafeMkAccountIndex 2147483648)
                     case res of
                          Left (WalletLayer.GetAccountError (V1 (Kernel.UnknownHdAccount _))) ->
                              return ()
@@ -315,9 +332,9 @@ spec = describe "Accounts" $ do
                     -- We create 4 accounts, plus one is created automatically
                     -- by the 'createWallet' endpoint, for a total of 5.
                     forM_ [1..4] $ \(_i :: Int) ->
-                        (WalletLayer._pwlCreateAccount layer) (V1.walId fixtureV1Wallet)
-                                                              fixtureNewAccountRq
-                    res <- (WalletLayer._pwlGetAccounts layer) (V1.walId fixtureV1Wallet)
+                        WalletLayer.createAccount layer (V1.walId fixtureV1Wallet)
+                                                        fixtureNewAccountRq
+                    res <- WalletLayer.getAccounts layer (V1.walId fixtureV1Wallet)
                     case res of
                          Left e     -> fail (show e)
                          Right accs -> IxSet.size accs `shouldBe` 5
@@ -326,7 +343,7 @@ spec = describe "Accounts" $ do
             monadicIO $ do
                 wId <- pick arbitrary
                 withLayer $ \layer _ -> do
-                    res <- (WalletLayer._pwlGetAccounts layer) wId
+                    res <- WalletLayer.getAccounts layer wId
                     case res of
                          Left (WalletLayer.GetAccountsError (Kernel.UnknownHdRoot _)) ->
                              return ()
@@ -351,3 +368,186 @@ spec = describe "Accounts" $ do
                     case res of
                          Left e   -> fail (show e)
                          Right wr -> (length $ API.wrData wr) `shouldBe` 5
+
+
+    describe "GetAccountAddresses" $ do
+
+        prop "fails if the account doesn't exists" $ withMaxSuccess 50 $ do
+            monadicIO $ do
+                withFixture $ \_ layer _ Fixture{..} -> do
+                    let params = API.RequestParams (API.PaginationParams (API.Page 1) (API.PerPage 10))
+                    let filters = API.NoFilters
+                    res <- WalletLayer.getAccountAddresses layer
+                             (V1.walId fixtureV1Wallet)
+                             (V1.unsafeMkAccountIndex 2147483648)
+                             params
+                             filters
+                    case res of
+                         Left (WalletLayer.GetAccountError (V1 (Kernel.UnknownHdAccount _))) ->
+                             return ()
+                         Left unexpectedErr ->
+                             fail $ "expecting different failure than " <> show unexpectedErr
+                         Right _ ->
+                             let errMsg = "expecting account not to be retrieved, but it was. random WalletId "
+                                        % build
+                                        % " , V1.Wallet "
+                             in fail $ formatToString errMsg (V1.walId fixtureV1Wallet)
+
+
+        prop "applied to each newly created accounts gives addresses as obtained from GetAccounts" $ withMaxSuccess 25 $ do
+            monadicIO $ do
+                withFixture $ \_ layer _ Fixture{..} -> do
+                    -- We create 4 accounts, plus one is created automatically
+                    -- by the 'createWallet' endpoint, for a total of 5.
+                    forM_ [1..4] $ \(_i :: Int) ->
+                        WalletLayer.createAccount layer (V1.walId fixtureV1Wallet)
+                                                        fixtureNewAccountRq
+                    accounts <- WalletLayer.getAccounts layer (V1.walId fixtureV1Wallet)
+                    let accountIndices =
+                            case accounts of
+                                Left _     -> []
+                                Right accs -> map V1.accIndex $ IxSet.toList accs
+                    let params = API.RequestParams (API.PaginationParams (API.Page 1) (API.PerPage 10))
+                    let filters = API.NoFilters
+                    partialAddresses <- forM accountIndices $ \(ind :: V1.AccountIndex) ->
+                        WalletLayer.getAccountAddresses layer (V1.walId fixtureV1Wallet) ind params filters
+                    case accounts of
+                        Right accs -> (map V1.accAddresses $ IxSet.toList accs)
+                                      `shouldBe`
+                                      (map (\(Right addr) -> API.wrData addr) partialAddresses)
+                        Left err   -> fail (show err)
+
+
+        prop "and this also works when called from Servant" $ withMaxSuccess 25 $ do
+            monadicIO $ do
+                withFixture $ \_ layer _ Fixture{..} -> do
+                    let create = Handlers.newAccount layer (V1.walId fixtureV1Wallet) fixtureNewAccountRq
+                    -- We create 4 accounts, plus one is created automatically
+                    -- by the 'createWallet' endpoint, for a total of 5.
+                    forM_ [1..4] $ \(_i :: Int) -> runExceptT . runHandler' $ create
+                    let params = API.RequestParams (API.PaginationParams (API.Page 1) (API.PerPage 10))
+                    let fetchForAccounts = Handlers.listAccounts layer (V1.walId fixtureV1Wallet) params
+                    accounts <- runExceptT . runHandler' $ fetchForAccounts
+                    let accountIndices =
+                            case accounts of
+                                Left _     -> []
+                                Right accs -> map V1.accIndex $ API.wrData accs
+                    let reqParams = API.RequestParams (API.PaginationParams (API.Page 1) (API.PerPage 10))
+                    let filters = API.NoFilters
+                    let fetchForAccountAddresses ind =
+                            Handlers.getAccountAddresses layer (V1.walId fixtureV1Wallet)
+                                                         ind reqParams filters
+                    partialAddresses <- forM accountIndices $ \(ind :: V1.AccountIndex) ->
+                        runExceptT . runHandler' $ fetchForAccountAddresses ind
+                    case accounts of
+                        Right accs  -> (map V1.accAddresses $ API.wrData accs)
+                                       `shouldBe`
+                                       (map (\(Right bal) -> (V1.acaAddresses . API.wrData) bal) partialAddresses)
+                        Left err   -> fail (show err)
+
+
+        prop "applied to accounts that were just updated via address creation is the same as obtained from GetAccounts" $ withMaxSuccess 25 $ do
+            monadicIO $ do
+                withFixture $ \_ layer _ Fixture{..} -> do
+                    -- We create 4 accounts, plus one is created automatically
+                    -- by the 'createWallet' endpoint, for a total of 5.
+                    forM_ [1..4] $ \(_i :: Int) ->
+                        WalletLayer.createAccount layer (V1.walId fixtureV1Wallet)
+                                                        fixtureNewAccountRq
+                    accountsBefore <- WalletLayer.getAccounts layer (V1.walId fixtureV1Wallet)
+                    let accountIndices =
+                            case accountsBefore of
+                                Left _     -> []
+                                Right accs -> map V1.accIndex $ IxSet.toList accs
+                    forM_ accountIndices $ \(accIdx :: V1.AccountIndex) ->
+                                WalletLayer.createAddress layer (V1.NewAddress Nothing accIdx (V1.walId fixtureV1Wallet))
+                    accountsUpdated <- WalletLayer.getAccounts layer (V1.walId fixtureV1Wallet)
+                    let params = API.RequestParams (API.PaginationParams (API.Page 1) (API.PerPage 10))
+                    let filters = API.NoFilters
+                    partialAddresses <- forM accountIndices $ \(ind :: V1.AccountIndex) ->
+                        WalletLayer.getAccountAddresses layer (V1.walId fixtureV1Wallet) ind params filters
+                    case accountsUpdated of
+                        Right accs -> (map V1.accAddresses $ IxSet.toList accs)
+                                      `shouldBe`
+                                      (map (\(Right addr) -> API.wrData addr) partialAddresses)
+                        Left err   -> fail (show err)
+
+
+    describe "GetAccountBalance" $ do
+
+        prop "gives zero balance for newly created account" $ withMaxSuccess 25 $ do
+            monadicIO $ do
+                withFixture $ \_ layer _ Fixture{..} -> do
+                    let zero = V1 (mkCoin 0)
+                    (Right V1.Account{..}) <-
+                        WalletLayer.createAccount layer (V1.walId fixtureV1Wallet)
+                                                        fixtureNewAccountRq
+                    res <- WalletLayer.getAccountBalance layer (V1.walId fixtureV1Wallet)
+                                                               accIndex
+                    case res of
+                         Left e    -> fail (show e)
+                         Right balance -> balance `shouldBe` V1.AccountBalance zero
+
+        prop "fails if the account doesn't exists" $ withMaxSuccess 50 $ do
+            monadicIO $ do
+                withFixture $ \_ layer _ Fixture{..} -> do
+                    res <- WalletLayer.getAccountBalance layer
+                             (V1.walId fixtureV1Wallet)
+                             (V1.unsafeMkAccountIndex 2147483648)
+                    case res of
+                         Left (WalletLayer.GetAccountError (V1 (Kernel.UnknownHdAccount _))) ->
+                             return ()
+                         Left unexpectedErr ->
+                             fail $ "expecting different failure than " <> show unexpectedErr
+                         Right _ ->
+                             let errMsg = "expecting account not to be retrieved, but it was. random WalletId "
+                                        % build
+                                        % " , V1.Wallet "
+                             in fail $ formatToString errMsg (V1.walId fixtureV1Wallet)
+
+
+
+        prop "applied to each newly created account gives balances as obtained from GetAccounts" $ withMaxSuccess 25 $ do
+            monadicIO $ do
+                withFixture $ \_ layer _ Fixture{..} -> do
+                    -- We create 4 accounts, plus one is created automatically
+                    -- by the 'createWallet' endpoint, for a total of 5.
+                    forM_ [1..4] $ \(_i :: Int) ->
+                        WalletLayer.createAccount layer (V1.walId fixtureV1Wallet)
+                                                        fixtureNewAccountRq
+                    accounts <- WalletLayer.getAccounts layer (V1.walId fixtureV1Wallet)
+                    let accountIndices =
+                            case accounts of
+                                Left _     -> []
+                                Right accs -> map V1.accIndex $ IxSet.toList accs
+                    partialBalances <- forM accountIndices $ \(ind :: V1.AccountIndex) ->
+                        WalletLayer.getAccountBalance layer (V1.walId fixtureV1Wallet) ind
+                    case (accounts, length partialBalances /= 5) of
+                        (Right accs, False) -> (map (V1.AccountBalance . V1.accAmount) $ IxSet.toList accs)
+                                               `shouldBe`
+                                               (map (\(Right bal) -> bal) partialBalances)
+                        _                   -> fail "expecting to get 5 balances from partial getters"
+
+
+        prop "and this also works when called from Servant" $ withMaxSuccess 25 $ do
+            monadicIO $ do
+                withFixture $ \_ layer _ Fixture{..} -> do
+                    let create = Handlers.newAccount layer (V1.walId fixtureV1Wallet) fixtureNewAccountRq
+                    -- We create 4 accounts, plus one is created automatically
+                    -- by the 'createWallet' endpoint, for a total of 5.
+                    forM_ [1..4] $ \(_i :: Int) -> runExceptT . runHandler' $ create
+                    let params = API.RequestParams (API.PaginationParams (API.Page 1) (API.PerPage 10))
+                    let fetchForAccounts = Handlers.listAccounts layer (V1.walId fixtureV1Wallet) params
+                    accounts <- runExceptT . runHandler' $ fetchForAccounts
+                    let accountIndices =
+                            case accounts of
+                                Left _     -> []
+                                Right accs -> map V1.accIndex $ API.wrData accs
+                    let fetchForAccountBalance = Handlers.getAccountBalance layer (V1.walId fixtureV1Wallet)
+                    partialBalances <- forM accountIndices $ \(ind :: V1.AccountIndex) ->
+                        runExceptT . runHandler' $ fetchForAccountBalance ind
+                    case (accounts, length partialBalances /= 5) of
+                        (Right accs, False) -> (map (V1.AccountBalance . V1.accAmount) $ API.wrData accs)
+                                               `shouldBe`
+                                               (map (\(Right bal) -> API.wrData bal) partialBalances)
+                        _                   -> fail "expecting to get 5 balances from partial getters"

@@ -15,6 +15,7 @@ module Pos.Wallet.Web.Methods.Misc
 
        , syncProgress
        , localTimeDifference
+       , localTimeDifferencePure
 
        , requestShutdown
 
@@ -39,7 +40,6 @@ import qualified Formatting.Buildable
 import           Serokell.Util (listJson)
 import           Servant.API.ContentTypes (MimeRender (..), NoContent (..),
                      OctetStream)
-import           System.Wlog (WithLogger)
 import           UnliftIO (MonadUnliftIO)
 
 import           Ntp.Client (NtpStatus (..))
@@ -48,7 +48,8 @@ import           Pos.Chain.Txp (TxId, TxIn, TxOut)
 import           Pos.Chain.Update (HasUpdateConfiguration, curSoftwareVersion)
 import           Pos.Client.KeyStorage (MonadKeys (..), deleteAllSecretKeys)
 import           Pos.Configuration (HasNodeConfiguration)
-import           Pos.Core (HasConfiguration, SlotId)
+import           Pos.Core (HasConfiguration, ProtocolConstants, SlotId,
+                     pcEpochSlots)
 import           Pos.Core.Conc (async, delay)
 import           Pos.Core.Update (SoftwareVersion (..))
 import           Pos.Crypto (hashHexF)
@@ -57,6 +58,7 @@ import           Pos.Infra.Slotting (MonadSlots, getCurrentSlotBlocking)
 import           Pos.Infra.Util.LogSafe (logInfoUnsafeP)
 import           Pos.Util (maybeThrow)
 import           Pos.Util.Servant (HasTruncateLogPolicy (..))
+import           Pos.Util.Wlog (WithLogger)
 import           Pos.Wallet.Aeson.ClientTypes ()
 import           Pos.Wallet.Aeson.Storage ()
 import           Pos.Wallet.WalletMode (MonadBlockchainInfo, MonadUpdates,
@@ -170,14 +172,13 @@ syncProgress = do
 -- NTP (Network Time Protocol) based time difference
 ----------------------------------------------------------------------------
 
+localTimeDifferencePure :: NtpStatus -> Maybe Integer
+localTimeDifferencePure (NtpDrift time)    = Just (toMicroseconds time)
+localTimeDifferencePure NtpSyncPending     = Nothing
+localTimeDifferencePure NtpSyncUnavailable = Nothing
+
 localTimeDifference :: MonadIO m => TVar NtpStatus -> m (Maybe Integer)
-localTimeDifference ntpStatus = diff <$> readTVarIO ntpStatus
-  where
-    diff :: NtpStatus -> Maybe Integer
-    diff = \case
-        NtpDrift time -> Just (toMicroseconds time)
-        NtpSyncPending -> Nothing
-        NtpSyncUnavailable -> Nothing
+localTimeDifference ntpStatus = localTimeDifferencePure <$> (atomically $ readTVar ntpStatus)
 
 ----------------------------------------------------------------------------
 -- Reset
@@ -215,10 +216,13 @@ dumpState = WalletStateSnapshot <$> askWalletSnapshot
 -- Tx resubmitting
 ----------------------------------------------------------------------------
 
-resetAllFailedPtxs :: (HasConfiguration, MonadSlots ctx m, WalletDbReader ctx m) => m NoContent
-resetAllFailedPtxs = do
+resetAllFailedPtxs
+    :: (MonadSlots ctx m, WalletDbReader ctx m)
+    => ProtocolConstants
+    -> m NoContent
+resetAllFailedPtxs pc = do
     db <- askWalletDB
-    getCurrentSlotBlocking >>= resetFailedPtxs db
+    getCurrentSlotBlocking (pcEpochSlots pc) >>= resetFailedPtxs pc db
     return NoContent
 
 ----------------------------------------------------------------------------

@@ -41,13 +41,12 @@ import           Pos.Chain.Block (Blund, LastKnownHeaderTag, blockHeader,
 import           Pos.Chain.Txp (TxpConfiguration, Utxo)
 import           Pos.Client.KeyStorage (getSecretKeysPlain)
 import           Pos.Client.Txp.Balances (getBalance)
-import           Pos.Core (Address, BlockCount, Coin, HasConfiguration,
-                     genesisSecretsPoor)
+import           Pos.Core (Address, BlockCount, Coin, HasConfiguration)
 import           Pos.Core.Chrono (OldestFirst (..))
 import           Pos.Core.Common (IsBootstrapEraAddr (..), deriveLvl2KeyPair)
 import           Pos.Core.Genesis (poorSecretToEncKey)
 import           Pos.Core.Txp (TxIn, TxOut (..), TxOutAux (..))
-import           Pos.Crypto (EncryptedSecretKey, PassPhrase, ProtocolMagic,
+import           Pos.Crypto (EncryptedSecretKey, PassPhrase,
                      ShouldCheckPassphrase (..), emptyPassphrase,
                      firstHardened)
 import           Pos.Generator.Block (genBlocks)
@@ -65,6 +64,8 @@ import           Pos.Infra.Util.JsonLog.Events
 import           Test.Pos.Block.Logic.Util (EnableTxPayload, InplaceDB,
                      genBlockGenParams)
 import           Test.Pos.Core.Arbitrary.Txp ()
+import           Test.Pos.Core.Dummy (dummyConfig, dummyGenesisData,
+                     dummyGenesisSecretsPoor)
 import           Test.Pos.Util.QuickCheck.Property (assertProperty,
                      maybeStopProperty)
 import           Test.Pos.Wallet.Web.Mode (WalletProperty)
@@ -76,17 +77,16 @@ import           Test.Pos.Wallet.Web.Mode (WalletProperty)
 -- | Gen blocks in WalletProperty
 wpGenBlocks
     :: HasConfigurations
-    => ProtocolMagic
-    -> TxpConfiguration
+    => TxpConfiguration
     -> Maybe BlockCount
     -> EnableTxPayload
     -> InplaceDB
     -> WalletProperty (OldestFirst [] Blund)
-wpGenBlocks pm txpConfig blkCnt enTxPayload inplaceDB = do
-    params <- genBlockGenParams pm blkCnt enTxPayload inplaceDB
+wpGenBlocks txpConfig blkCnt enTxPayload inplaceDB = do
+    params <- genBlockGenParams dummyConfig blkCnt enTxPayload inplaceDB
     g <- pick $ MkGen $ \qc _ -> qc
     lift $ modifyStateLock HighPriority ApplyBlock $ \prevTip -> do -- FIXME is ApplyBlock the right one?
-        blunds <- OldestFirst <$> evalRandT (genBlocks pm txpConfig params maybeToList) g
+        blunds <- OldestFirst <$> evalRandT (genBlocks dummyConfig txpConfig params maybeToList) g
         case nonEmpty $ getOldestFirst blunds of
             Just nonEmptyBlunds -> do
                 let tipBlockHeader = nonEmptyBlunds ^. _neLast . _1 . blockHeader
@@ -97,12 +97,11 @@ wpGenBlocks pm txpConfig blkCnt enTxPayload inplaceDB = do
 
 wpGenBlock
     :: HasConfigurations
-    => ProtocolMagic
-    -> TxpConfiguration
+    => TxpConfiguration
     -> EnableTxPayload
     -> InplaceDB
     -> WalletProperty Blund
-wpGenBlock pm txpConfig = fmap (Data.List.head . toList) ... wpGenBlocks pm txpConfig (Just 1)
+wpGenBlock txpConfig = fmap (Data.List.head . toList) ... wpGenBlocks txpConfig (Just 1)
 
 ----------------------------------------------------------------------------
 -- Wallet test helpers
@@ -114,16 +113,14 @@ importWallets
     :: HasConfigurations
     => Int -> Gen PassPhrase -> WalletProperty [PassPhrase]
 importWallets numLimit passGen = do
-    let secrets =
-            map poorSecretToEncKey $
-            fromMaybe (error "Generated secrets are unknown") genesisSecretsPoor
+    let secrets = map poorSecretToEncKey dummyGenesisSecretsPoor
     (encSecrets, passphrases) <- pick $ do
         seks <- take numLimit <$> sublistOf secrets `suchThat` (not . null)
         let l = length seks
         passwds <- vectorOf l passGen
         pure (seks, passwds)
     let wuses = map mkGenesisWalletUserSecret encSecrets
-    lift $ mapM_ (uncurry importWalletDo) (zip passphrases wuses)
+    lift $ mapM_ (uncurry $ importWalletDo dummyConfig) (zip passphrases wuses)
     skeys <- lift getSecretKeysPlain
     assertProperty (not (null skeys)) "Empty set of imported keys"
     pure passphrases
@@ -218,7 +215,7 @@ genWalletUtxo sk psw size =
 -- | Checks that balance of address is positive and returns it.
 expectedAddrBalance :: HasConfiguration => Address -> Coin -> WalletProperty ()
 expectedAddrBalance addr expected = do
-    balance <- lift $ getBalance addr
+    balance <- lift $ getBalance dummyGenesisData addr
     assertProperty (balance == expected) $
         sformat ("balance for address "%build
                     %" mismatched, expected: "%build

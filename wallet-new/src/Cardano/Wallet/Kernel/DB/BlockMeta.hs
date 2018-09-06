@@ -1,4 +1,6 @@
-{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE RankNTypes                 #-}
+{-# LANGUAGE StandaloneDeriving         #-}
 
 -- | Block metadata conform the wallet specification
 module Cardano.Wallet.Kernel.DB.BlockMeta (
@@ -24,8 +26,7 @@ import           Universum
 import           Control.Lens (at, non)
 import           Control.Lens.TH (makeLenses, makeWrapped)
 import qualified Data.Map.Strict as Map
-import           Data.SafeCopy (SafeCopy (..), base, contain, deriveSafeCopy,
-                     safeGet, safePut)
+import           Data.SafeCopy (base, deriveSafeCopy)
 import           Formatting (bprint, build, (%))
 import qualified Formatting.Buildable
 import           Serokell.Util (mapJson)
@@ -70,30 +71,25 @@ deriveSafeCopy 1 'base ''AddressMeta
 -- | Block metadata
 data BlockMeta = BlockMeta {
       -- | Slot each transaction got confirmed in
-      _blockMetaSlotId      :: InDb (Map Txp.TxId Core.SlotId)
+      _blockMetaSlotId      :: !(InDb (Map Txp.TxId Core.SlotId))
       -- | Address metadata
-    , _blockMetaAddressMeta :: InDb (Map Core.Address AddressMeta)
+    , _blockMetaAddressMeta :: !(Map (InDb Core.Address) AddressMeta)
     } deriving Eq
 
 makeLenses ''BlockMeta
-
--- TODO @uroboros/ryan [CBR 305] Implement Safecopy instances independently from legacy wallet
-instance SafeCopy (InDb (Map Core.Address AddressMeta)) where
-    putCopy (InDb h) = contain $ safePut h
-    getCopy = contain $ InDb <$> safeGet
-
 deriveSafeCopy 1 'base ''BlockMeta
+
 -- | Address metadata for the specified address
 --
 -- When the block metadata does not contain any information about this address,
 -- we assume 'mempty'.
 addressMeta :: Core.Address -> Lens' BlockMeta AddressMeta
-addressMeta addr = blockMetaAddressMeta . fromDb . at addr . non mempty
+addressMeta addr = blockMetaAddressMeta . at (InDb addr) . non mempty
 
 emptyBlockMeta :: BlockMeta
 emptyBlockMeta = BlockMeta {
       _blockMetaSlotId      = InDb Map.empty
-    , _blockMetaAddressMeta = InDb Map.empty
+    , _blockMetaAddressMeta = Map.empty
     }
 
 {-------------------------------------------------------------------------------
@@ -107,6 +103,7 @@ emptyBlockMeta = BlockMeta {
 -- 'BlockMeta' type is the same; 'LocalBlockMeta' serves merely as a marker that
 -- this data is potentially incomplete.
 newtype LocalBlockMeta = LocalBlockMeta { localBlockMeta :: BlockMeta }
+        deriving Eq
 
 makeWrapped ''LocalBlockMeta
 
@@ -121,7 +118,7 @@ appendBlockMeta :: BlockMeta -> LocalBlockMeta -> BlockMeta
 appendBlockMeta cur (LocalBlockMeta new) = BlockMeta {
         _blockMetaSlotId      = combineUsing (liftA2 Map.union)
                                   _blockMetaSlotId
-      , _blockMetaAddressMeta = combineUsing (liftA2 (Map.unionWith (<>)))
+      , _blockMetaAddressMeta = combineUsing (Map.unionWith (<>))
                                   _blockMetaAddressMeta
       }
   where
@@ -167,4 +164,6 @@ instance Buildable BlockMeta where
         % "}"
         )
         (_fromDb _blockMetaSlotId)
-        (_fromDb _blockMetaAddressMeta)
+        _blockMetaAddressMeta
+
+deriving instance Buildable LocalBlockMeta

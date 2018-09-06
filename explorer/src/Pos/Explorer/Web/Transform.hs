@@ -25,7 +25,7 @@ import           Pos.Chain.Block (HasBlockConfiguration)
 import           Pos.Chain.Ssc (HasSscConfiguration)
 import           Pos.Chain.Update (HasUpdateConfiguration)
 import           Pos.Configuration (HasNodeConfiguration)
-import           Pos.Core (HasConfiguration)
+import           Pos.Core as Core (Config (..), HasConfiguration)
 import           Pos.DB.Txp (MempoolExt, MonadTxpLocal (..))
 import           Pos.Infra.Diffusion.Types (Diffusion)
 import           Pos.Infra.Reporting (MonadReporting (..))
@@ -61,7 +61,7 @@ instance HasConfiguration =>
 instance HasConfiguration =>
          MonadTxpLocal ExplorerProd where
     txpNormalize pm = lift . lift . txpNormalize pm
-    txpProcessTx pm txpConfig = lift . lift . txpProcessTx pm txpConfig
+    txpProcessTx coreConfig txpConfig = lift . lift . txpProcessTx coreConfig txpConfig
 
 -- | Use the 'RealMode' instance.
 -- FIXME instance on a type synonym.
@@ -85,37 +85,43 @@ type HasExplorerConfiguration =
 
 notifierPlugin
     :: HasExplorerConfiguration
-    => NotifierSettings
+    => Core.Config
+    -> NotifierSettings
     -> Diffusion ExplorerProd
     -> ExplorerProd ()
-notifierPlugin settings _ = notifierApp settings
+notifierPlugin coreConfig settings _ = notifierApp coreConfig settings
 
 explorerPlugin
     :: HasExplorerConfiguration
-    => Word16
+    => Core.Config
+    -> Word16
     -> Diffusion ExplorerProd
     -> ExplorerProd ()
-explorerPlugin = flip explorerServeWebReal
+explorerPlugin coreConfig = flip $ explorerServeWebReal coreConfig
 
 explorerServeWebReal
     :: HasExplorerConfiguration
-    => Diffusion ExplorerProd
+    => Core.Config
+    -> Diffusion ExplorerProd
     -> Word16
     -> ExplorerProd ()
-explorerServeWebReal diffusion port = do
+explorerServeWebReal coreConfig diffusion port = do
     rctx <- ask
-    let handlers = explorerHandlers diffusion
-        server = hoistServer explorerApi (convertHandler rctx) handlers
+    let handlers = explorerHandlers coreConfig diffusion
+        server   = hoistServer
+            explorerApi
+            (convertHandler coreConfig rctx)
+            handlers
         app = explorerApp (pure server)
     explorerServeImpl app port
 
 convertHandler
-    :: HasConfiguration
-    => RealModeContext ExplorerExtraModifier
+    :: Core.Config
+    -> RealModeContext ExplorerExtraModifier
     -> ExplorerProd a
     -> Handler a
-convertHandler rctx handler =
-    let extraCtx = makeExtraCtx
+convertHandler coreConfig rctx handler =
+    let extraCtx = makeExtraCtx coreConfig
         ioAction = realRunner $
                    runExplorerProd extraCtx
                    handler

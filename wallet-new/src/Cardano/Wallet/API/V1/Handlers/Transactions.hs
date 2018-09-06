@@ -16,9 +16,8 @@ import           Data.Coerce (coerce)
 
 import           Pos.Client.Txp.Util (InputSelectionPolicy (..),
                      defaultInputSelectionPolicy)
-import           Pos.Core (Address)
-import           Pos.Core.Txp (Tx (..), TxOut (..))
-import           Pos.Crypto (hash)
+import           Pos.Core (Address, Timestamp)
+import           Pos.Core.Txp (TxId)
 
 import           Cardano.Wallet.API.Request
 import           Cardano.Wallet.API.Response
@@ -26,10 +25,11 @@ import qualified Cardano.Wallet.API.V1.Transactions as Transactions
 import           Cardano.Wallet.API.V1.Types
 import           Cardano.Wallet.Kernel.CoinSelection.FromGeneric
                      (ExpenseRegulation (..), InputGrouping (..))
-import           Cardano.Wallet.Kernel.Util.Core (getCurrentTimestamp,
-                     paymentAmount)
+import           Cardano.Wallet.Kernel.DB.HdWallet (UnknownHdAccount)
+import           Cardano.Wallet.Kernel.DB.TxMeta (TxMeta)
+import qualified Cardano.Wallet.Kernel.Transactions as Kernel
 import           Cardano.Wallet.WalletLayer (ActiveWalletLayer,
-                     PassiveWalletLayer)
+                     NewPaymentError (..), PassiveWalletLayer)
 import qualified Cardano.Wallet.WalletLayer as WalletLayer
 
 handlers :: ActiveWalletLayer IO -> ServerT Transactions.API Handler
@@ -60,15 +60,26 @@ newTransaction aw payment@Payment{..} = liftIO $ do
                                          SenderPaysFee
                                          payment
     case res of
-         Left err -> throwM err
-         Right (_, meta) -> single <$> WalletLayer.getTxFromMeta (WalletLayer.walletPassiveLayer aw) meta
+         Left err        -> throwM err
+         Right (_, meta) -> txFromMeta aw NewPaymentUnknownAccountId meta
+
+txFromMeta :: Exception e
+           => ActiveWalletLayer IO
+           -> (UnknownHdAccount -> e)
+           -> TxMeta
+           -> IO (WalletResponse Transaction)
+txFromMeta aw embedErr meta = do
+    mTx <- WalletLayer.getTxFromMeta (WalletLayer.walletPassiveLayer aw) meta
+    case mTx of
+      Left err -> throwM (embedErr err)
+      Right tx -> return $ single tx
 
 getTransactionsHistory :: PassiveWalletLayer IO
                        -> Maybe WalletId
                        -> Maybe AccountIndex
                        -> Maybe (V1 Address)
                        -> RequestParams
-                       -> FilterOperations Transaction
+                       -> FilterOperations '[V1 TxId, V1 Timestamp] Transaction
                        -> SortOperations Transaction
                        -> Handler (WalletResponse [Transaction])
 getTransactionsHistory pw mwalletId mAccIdx mAddr requestParams fops sops =
@@ -96,28 +107,11 @@ estimateFees aw payment@Payment{..} = do
 redeemAda :: ActiveWalletLayer IO
           -> Redemption
           -> Handler (WalletResponse Transaction)
-redeemAda layer redemption = do
-    res <- liftIO $ WalletLayer.redeemAda layer redemption
+redeemAda aw redemption = liftIO $ do
+    res <- WalletLayer.redeemAda aw redemption
     case res of
-         Left e -> throwM e
-         Right tx -> do
-             -- TODO: This is a straight copy and paste from 'newTransaction' in
-             -- "Cardano.Wallet.API.V1.Handlers.Transactions". Once [CBR-239]
-             -- is fixed, we should fix both instances.
-             now <- liftIO getCurrentTimestamp
-             -- NOTE(adn) As part of [CBR-239], we could simply fetch the
-             -- entire 'Transaction' as part of the TxMeta.
-             return $ single Transaction {
-                 txId            = V1 (hash tx)
-               , txConfirmations = 0
-               , txAmount        = V1 (paymentAmount $ _txOutputs tx)
-               , txInputs        = error "TODO, see [CBR-324]"
-               , txOutputs       = fmap outputsToDistribution (_txOutputs tx)
-               , txType          = error "TODO, see [CBR-324]"
-               , txDirection     = OutgoingTransaction
-               , txCreationTime  = V1 now
-               , txStatus        = Creating
-               }
+      Left err        -> throwM err
+      Right (_, meta) -> txFromMeta aw embedErr meta
   where
-    outputsToDistribution :: TxOut -> PaymentDistribution
-    outputsToDistribution (TxOut addr amount) = PaymentDistribution (V1 addr) (V1 amount)
+    embedErr :: UnknownHdAccount -> WalletLayer.RedeemAdaError
+    embedErr = WalletLayer.RedeemAdaError . Kernel.RedeemAdaUnknownAccountId

@@ -73,7 +73,7 @@ genNewWalletRq spendingPassword = do
 prepareFixtures :: GenPassiveWalletFixture Fixture
 prepareFixtures = do
     spendingPassword <- pick (arbitrary `suchThat` ((/=) mempty))
-    newWalletRq <- genNewWalletRq (Just spendingPassword)
+    newWalletRq <- WalletLayer.CreateWallet <$> genNewWalletRq (Just spendingPassword)
     return $ \pw -> do
         res <- Wallets.createWallet pw newWalletRq
         case res of
@@ -107,24 +107,24 @@ spec = describe "Wallets" $ do
             prop "works as expected in the happy path scenario" $ withMaxSuccess 50 $ do
                 monadicIO $ do
                     pwd     <- genSpendingPassword
-                    request <- genNewWalletRq pwd
+                    request <- WalletLayer.CreateWallet <$> genNewWalletRq pwd
                     withLayer $ \layer _ -> do
                         liftIO $ do
-                            res <- (WalletLayer._pwlCreateWallet layer) request
+                            res <- WalletLayer.createWallet layer request
                             (bimap STB STB res) `shouldSatisfy` isRight
 
             prop "fails if the wallet already exists" $ withMaxSuccess 50 $ do
                 monadicIO $ do
                     pwd     <- genSpendingPassword
-                    request <- genNewWalletRq pwd
+                    request <- WalletLayer.CreateWallet <$> genNewWalletRq pwd
                     withLayer $ \layer _ -> do
                         liftIO $ do
                             -- The first time it must succeed.
-                            res1 <- (WalletLayer._pwlCreateWallet layer) request
+                            res1 <- WalletLayer.createWallet layer request
                             (bimap STB STB res1) `shouldSatisfy` isRight
 
                             -- The second time it must not.
-                            res2 <- (WalletLayer._pwlCreateWallet layer) request
+                            res2 <- WalletLayer.createWallet layer request
                             case res2 of
                                  Left (WalletLayer.CreateWalletError (CreateWalletFailed (CreateHdRootExists _))) ->
                                      return ()
@@ -137,9 +137,10 @@ spec = describe "Wallets" $ do
                     pwd     <- genSpendingPassword
                     request <- genNewWalletRq pwd
                     withLayer $ \layer _ -> do
-                        let w' = request { V1.newwalName = "İıÀļƒȑĕďŏŨƞįťŢęșťıİ 日本" }
+                        let w' = WalletLayer.CreateWallet $
+                                request { V1.newwalName = "İıÀļƒȑĕďŏŨƞįťŢęșťıİ 日本" }
                         liftIO $ do
-                            res <- (WalletLayer._pwlCreateWallet layer) w'
+                            res <- WalletLayer.createWallet layer w'
                             (bimap STB STB res) `shouldSatisfy` isRight
 
 
@@ -207,7 +208,7 @@ spec = describe "Wallets" $ do
                             foldM_ (check isRight) () allAccounts
 
                             -- Deletion should still return 'Right'.
-                            res <- (WalletLayer.deleteWallet layer wId)
+                            res <- WalletLayer.deleteWallet layer wId
                             (bimap STB STB res) `shouldSatisfy` isRight
 
                             -- Fetching the old, not-existing-anymore accounts
@@ -257,7 +258,7 @@ spec = describe "Wallets" $ do
                     withNewWalletFixture $ \ _ layer _ Fixture{..} -> do
                             let request = V1.PasswordUpdate fixtureSpendingPassword newPwd
                             let wId     = V1.walId fixtureV1Wallet
-                            res <- (WalletLayer._pwlUpdateWalletPassword layer) wId request
+                            res <- WalletLayer.updateWalletPassword layer wId request
                             (bimap STB STB res) `shouldSatisfy` isRight
 
             prop "fails if the old password doesn't match" $ withMaxSuccess 50 $ do
@@ -267,7 +268,7 @@ spec = describe "Wallets" $ do
                     withNewWalletFixture $ \ _ layer _ Fixture{..} -> do
                             let request = V1.PasswordUpdate wrongPwd newPwd
                             let wId     = V1.walId fixtureV1Wallet
-                            res <- (WalletLayer._pwlUpdateWalletPassword layer) wId request
+                            res <- WalletLayer.updateWalletPassword layer wId request
                             case res of
                                  Left (WalletLayer.UpdateWalletPasswordError (Kernel.UpdateWalletPasswordOldPasswordMismatch _)) ->
                                      return ()
@@ -418,7 +419,8 @@ spec = describe "Wallets" $ do
 
             prop "works as expected in the happy path scenario" $ withMaxSuccess 50 $ do
                 monadicIO $ do
-                    rqs <- map (\rq -> rq { V1.newwalOperation = V1.CreateWallet })
+                    rqs <- map (\rq -> WalletLayer.CreateWallet $
+                                   rq { V1.newwalOperation = V1.CreateWallet })
                                <$> pick (vectorOf 5 arbitrary)
                     withLayer $ \layer _ -> do
                         forM_ rqs (WalletLayer.createWallet layer)

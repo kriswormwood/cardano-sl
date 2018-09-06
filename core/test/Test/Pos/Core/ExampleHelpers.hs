@@ -76,12 +76,13 @@ module Test.Pos.Core.ExampleHelpers
         , feedPM
         , feedPC
         , feedPMC
+        , feedEpochSlots
+        , feedPMEpochSlots
        ) where
 
 import           Universum
 
 import qualified Crypto.SCRAPE as Scrape
-import qualified Crypto.Sign.Ed25519 as Ed25519
 import           Data.Coerce (coerce)
 import           Data.Fixed (Fixed (..))
 import qualified Data.HashMap.Strict as HM
@@ -116,9 +117,9 @@ import           Pos.Core.Genesis (FakeAvvmOptions (..),
                      GenesisSpec (..), TestnetBalanceOptions (..))
 import           Pos.Core.Merkle (mkMerkleTree, mtRoot)
 import           Pos.Core.ProtocolConstants (ProtocolConstants, VssMaxTTL (..),
-                     VssMinTTL (..))
+                     VssMinTTL (..), pcEpochSlots)
 import           Pos.Core.Slotting (EpochIndex (..), FlatSlotId,
-                     LocalSlotIndex (..), SlotId (..))
+                     LocalSlotIndex (..), SlotCount, SlotId (..))
 import           Pos.Core.Ssc (Commitment, CommitmentSignature, CommitmentsMap,
                      InnerSharesMap, Opening, OpeningsMap, SharesDistribution,
                      SignedCommitment, SscPayload (..), SscProof (..),
@@ -146,7 +147,7 @@ import           Pos.Crypto (AbstractHash (..), EncShare (..),
                      redeemDeterministicKeyGen, redeemSign, safeCreatePsk,
                      sign, toVssPublicKey)
 import           Pos.Crypto.Signing (ProxyCert (..), ProxySecretKey (..),
-                     PublicKey (..), RedeemPublicKey (..))
+                     PublicKey (..))
 
 import           Test.Pos.Core.Gen (genProtocolConstants)
 import           Test.Pos.Crypto.Bi (getBytes)
@@ -168,6 +169,14 @@ feedPMC genA = do
     pc <- genProtocolConstants
     genA pm pc
 
+feedEpochSlots :: (SlotCount -> H.Gen a) -> H.Gen a
+feedEpochSlots genA = genA =<< pcEpochSlots <$> genProtocolConstants
+
+feedPMEpochSlots :: (ProtocolMagic -> SlotCount -> H.Gen a) -> H.Gen a
+feedPMEpochSlots genA = do
+    pm <- genProtocolMagic
+    epochSlots <- pcEpochSlots <$> genProtocolConstants
+    genA pm epochSlots
 
 --------------------------------------------------------------------------------
 -- Example golden datatypes
@@ -630,17 +639,19 @@ exampleGenesisConfiguration_GCSpec =
 
 exampleGenesisAvvmBalances :: GenesisAvvmBalances
 exampleGenesisAvvmBalances =
-    GenesisAvvmBalances {getGenesisAvvmBalances =
-        (HM.fromList [(RedeemPublicKey (Ed25519.PublicKey fstRedKey)
-                     , Coin {getCoin = 36524597913081152})
-                     ,(RedeemPublicKey (Ed25519.PublicKey  sndRedKey)
-                     ,Coin {getCoin = 37343863242999412})
-                     ]) }
-  where
-    fstRedKey = hexToBS "e2a1773a2a82d10c30890cbf84eccbdc1aaaee9204\
-                        \96424d36e868039d9cb519"
-    sndRedKey = hexToBS "9cdabcec332abbc6fdf883ca5bf3a8afddca69bfea\
-                        \c14c013304da88ac032fe6"
+    GenesisAvvmBalances
+        { getGenesisAvvmBalances = HM.fromList
+            [ ( exampleRedeemPublicKey' (0, 32)
+              , Coin {getCoin = 36524597913081152}
+              )
+            , ( exampleRedeemPublicKey' (32, 32)
+              , Coin {getCoin = 37343863242999412}
+              )
+            ]
+        }
+    where
+        exampleRedeemPublicKey' :: (Int, Int) -> RedeemPublicKey
+        exampleRedeemPublicKey' (m, n) = fromJust (fst <$> redeemDeterministicKeyGen (getBytes m n))
 
 exampleSharedSeed :: SharedSeed
 exampleSharedSeed = SharedSeed (getBytes 8 32)

@@ -18,13 +18,14 @@ module Cardano.Wallet.Kernel.CoinSelection.FromGeneric (
   , largestFirst
     -- * Estimating fees
   , estimateCardanoFee
-  , dummyAddrAttrSize
-  , dummyTxAttrSize
+  , boundAddrAttrSize
+  , boundTxAttrSize
     -- * Estimating transaction limits
   , estimateMaxTxInputs
-  , estimateHardMaxTxInputs
     -- * Testing & internal use only
   , estimateSize
+  , estimateMaxTxInputsExplicitBounds
+  , estimateHardMaxTxInputsExplicitBounds
   ) where
 
 import           Universum hiding (Sum (..))
@@ -37,7 +38,7 @@ import           Data.Typeable (TypeRep, typeRep)
 import           Pos.Binary.Class (LengthOf, Range (..), SizeOverride (..),
                      encode, szSimplify, szWithCtx, toLazyByteString)
 import qualified Pos.Chain.Txp as Core
-import qualified Pos.Client.Txp.Util as Core
+import qualified Pos.Client.Txp.Util as CTxp
 import           Pos.Core (AddrAttributes, Coin (..), TxSizeLinear,
                      calculateTxSizeLinear)
 import qualified Pos.Core as Core
@@ -185,17 +186,20 @@ feeOptions CoinSelectionOptions{..} = FeeOptions{
 -- multisignature transactions, etc.
 mkStdTx :: Monad m
         => Core.ProtocolMagic
+        -> (forall a. NonEmpty a -> m (NonEmpty a))
+        -- ^ Shuffle function
         -> (Core.Address -> Either e Core.SafeSigner)
+        -- ^ Signer for each input of the transaction
         -> NonEmpty (Core.TxIn, Core.TxOutAux)
         -- ^ Selected inputs
         -> NonEmpty Core.TxOutAux
         -- ^ Selected outputs
         -> [Core.TxOutAux]
-        -- ^ A list of change addresess, in the form of 'TxOutAux'(s).
+        -- ^ Change outputs
         -> m (Either e Core.TxAux)
-mkStdTx pm hdwSigners inps outs change = do
-    let allOuts = foldl' (flip NE.cons) outs change
-    return $ Core.makeMPubKeyTxAddrs pm hdwSigners (fmap repack inps) allOuts
+mkStdTx pm shuffle hdwSigners inps outs change = do
+    allOuts <- shuffle $ foldl' (flip NE.cons) outs change
+    return $ CTxp.makeMPubKeyTxAddrs pm hdwSigners (fmap repack inps) allOuts
   where
     -- Repack a utxo-derived tuple into a format suitable for
     -- 'TxOwnedInputs'.
@@ -250,7 +254,6 @@ runCoinSelT opts pickUtxo policy request utxo = do
             originalOuts = case outs of
                                []   -> error "runCoinSelT: empty list of outputs"
                                o:os -> o :| os
-        -- TODO: We should shuffle allOuts CBR-380
         return . Right $ CoinSelFinalResult allInps
                                             originalOuts
                                             (concatMap coinSelChange css)
@@ -322,7 +325,7 @@ validateOutput :: Monad m
                -> CoinSelT utxo CoinSelHardErr m ()
 validateOutput out =
     when (Core.isRedeemAddress . Core.txOutAddress . Core.toaOut $ out) $
-      throwError $ CoinSelHardErrOutputIsRedeemAddress out
+      throwError $ CoinSelHardErrOutputIsRedeemAddress (pretty out)
 
 {-------------------------------------------------------------------------------
   Top-level entry points
@@ -421,17 +424,23 @@ estimateSize saa sta ins outs =
 estimateCardanoFee :: TxSizeLinear -> Int -> [Word64] -> Word64
 estimateCardanoFee linearFeePolicy ins outs
     = round $ calculateTxSizeLinear linearFeePolicy
-            $ hi $ estimateSize dummyAddrAttrSize dummyTxAttrSize ins outs
+            $ hi $ estimateSize boundAddrAttrSize boundTxAttrSize ins outs
 
 -- | Size to use for a value of type @Attributes AddrAttributes@ when estimating
 --   encoded transaction sizes. The minimum possible value is 2.
-dummyAddrAttrSize :: Byte
-dummyAddrAttrSize = 16
+--
+-- NOTE: When the /actual/ size exceeds this bounds, we may underestimate
+-- tranasction fees and potentially generate invalid transactions.
+boundAddrAttrSize :: Byte
+boundAddrAttrSize = 34
 
 -- | Size to use for a value of type @Attributes ()@ when estimating
 --   encoded transaction sizes. The minimum possible value is 2.
-dummyTxAttrSize :: Byte
-dummyTxAttrSize = 2
+--
+-- NOTE: When the /actual/ size exceeds this bounds, we may underestimate
+-- tranasction fees and potentially generate invalid transactions.
+boundTxAttrSize :: Byte
+boundTxAttrSize = 2
 
 -- | For a given transaction size, and sizes for @Attributes AddrAttributes@ and
 --   @Attributes ()@, compute the maximum possible number of inputs a transaction
@@ -441,16 +450,31 @@ dummyTxAttrSize = 2
 --   We use a conservative over-estimate for the encoded transaction sizes, so the
 --   number of transaction inputs computed here is a lower bound on the true
 --   maximum.
-estimateMaxTxInputs
+--
+-- NOTE: This function takes explicit bounds for tx and addr sizes. For most
+-- purposes you probably want 'estimateMaxTxInputs' instead.
+estimateMaxTxInputsExplicitBounds
   :: Byte -- ^ Size of @Attributes AddrAttributes@
   -> Byte -- ^ Size of @Attributes ()@
   -> Byte -- ^ Maximum size of a transaction
   -> Word64
-estimateMaxTxInputs addrAttrSize txAttrSize maxSize =
+estimateMaxTxInputsExplicitBounds addrAttrSize txAttrSize maxSize =
     fromIntegral (searchUp estSize maxSize 7)
-
   where
-    estSize txins = hi $ estimateSize addrAttrSize txAttrSize txins [Core.maxCoinVal]
+    estSize txins = hi $ estimateSize
+                           addrAttrSize
+                           txAttrSize
+                           txins
+                           [Core.maxCoinVal]
+
+-- | Variation on 'estimateMaxTxInputsExplicitBounds' that uses the bounds
+-- we use throughout the codebase
+estimateMaxTxInputs
+  :: Byte -- ^ Maximum size of a transaction
+  -> Word64
+estimateMaxTxInputs = estimateMaxTxInputsExplicitBounds
+                        boundAddrAttrSize
+                        boundTxAttrSize
 
 -- | For a given transaction size, and sizes for @Attributes AddrAttributes@ and
 --   @Attributes ()@, compute the maximum possible number of inputs a transaction
@@ -460,16 +484,21 @@ estimateMaxTxInputs addrAttrSize txAttrSize maxSize =
 --   possible inputs a transaction can have; by comparison, @estimateMaxTxInputs@
 --   gives an upper bound on the number of inputs you can put into a transaction,
 --   if you do not have /a priori/ control over the size of those inputs.
-estimateHardMaxTxInputs
+--
+-- Used only in testing. See 'estimateMaxTxInputs'.
+estimateHardMaxTxInputsExplicitBounds
   :: Byte -- ^ Size of @Attributes AddrAttributes@
   -> Byte -- ^ Size of @Attributes ()@
   -> Byte -- ^ Maximum size of a transaction
   -> Word64
-estimateHardMaxTxInputs addrAttrSize txAttrSize maxSize =
+estimateHardMaxTxInputsExplicitBounds addrAttrSize txAttrSize maxSize =
     fromIntegral (searchUp estSize maxSize 7)
-
   where
-    estSize txins = lo $ estimateSize addrAttrSize txAttrSize txins [minBound]
+    estSize txins = lo $ estimateSize
+                           addrAttrSize
+                           txAttrSize
+                           txins
+                           [minBound]
 
 -- | Substitutions for certain sizes and lengths in the size estimates.
 sizeEstimateCtx :: Map TypeRep SizeOverride

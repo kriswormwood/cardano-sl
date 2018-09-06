@@ -1,5 +1,6 @@
-{-# LANGUAGE Rank2Types   #-}
-{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE Rank2Types      #-}
+{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE TypeFamilies    #-}
 
 -- | Type classes for Poll abstraction.
 
@@ -28,7 +29,6 @@ import qualified Data.HashMap.Strict as HM
 import qualified Data.HashSet as HS
 import qualified Data.List as List (find)
 import qualified Ether
-import           System.Wlog (WithLogger, logWarning)
 
 import           Pos.Chain.Update.BlockVersion (applyBVM)
 import           Pos.Chain.Update.Poll.Modifier (PollModifier (..),
@@ -50,6 +50,7 @@ import           Pos.Core.Update (ApplicationName, BlockVersion,
 import           Pos.Crypto (hash)
 import qualified Pos.Util.Modifier as MM
 import           Pos.Util.Util (ether)
+import           Pos.Util.Wlog (WithLogger, logWarning)
 
 ----------------------------------------------------------------------------
 -- Read-only

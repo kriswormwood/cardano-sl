@@ -1,6 +1,7 @@
 {-# OPTIONS_GHC -fno-warn-orphans       #-}
 {-# LANGUAGE TupleSections #-}
 {-# LANGUAGE ViewPatterns  #-}
+
 module Test.Spec.CoinSelection (
     spec
   ) where
@@ -25,7 +26,8 @@ import qualified Text.Tabl as Tabl
 
 import           Pos.Binary.Class (Bi (encode), toLazyByteString)
 import qualified Pos.Chain.Txp as Core
-import           Pos.Core (Coeff (..), TxSizeLinear (..))
+import           Pos.Core as Core (Coeff (..), Config (..), TxSizeLinear (..),
+                     unsafeIntegerToCoin)
 import qualified Pos.Core as Core
 import           Pos.Core.Attributes (mkAttributes)
 import           Pos.Crypto (SecretKey)
@@ -37,11 +39,11 @@ import           Util.Buildable
 import           Cardano.Wallet.Kernel.CoinSelection (CoinSelFinalResult (..),
                      CoinSelHardErr (..), CoinSelPolicy,
                      CoinSelectionOptions (..), ExpenseRegulation (..),
-                     InputGrouping (..), largestFirst, mkStdTx, newOptions,
-                     random)
+                     InputGrouping (..), estimateMaxTxInputsExplicitBounds,
+                     largestFirst, mkStdTx, newOptions, random)
 import           Cardano.Wallet.Kernel.CoinSelection.FromGeneric
-                     (estimateCardanoFee, estimateHardMaxTxInputs,
-                     estimateMaxTxInputs)
+                     (estimateCardanoFee,
+                     estimateHardMaxTxInputsExplicitBounds)
 import           Cardano.Wallet.Kernel.Util.Core (paymentAmount, utxoBalance,
                      utxoRestrictToInputs)
 import           Pos.Crypto.Signing.Safe (fakeSigner)
@@ -138,7 +140,7 @@ renderUtxoAndPayees utxo outputs =
                                    (sortedPayees $ toList outputs) <> footer
 
       footer :: [Row]
-      footer = ["Total", "Total"] : [[T.pack . show . Core.getCoin . utxoBalance $ utxo
+      footer = ["Total", "Total"] : [[T.pack . show . utxoBalance $ utxo
                                     , T.pack . show . Core.getCoin . paymentAmount $ outputs
                                     ]]
 
@@ -186,9 +188,9 @@ renderTx payees utxo tx =
           in header : (subTable1 `mergeRows` subTable2) <> footer
 
       footer :: [Row]
-      footer = replicate 4 "Total" : [[T.pack . show . Core.getCoin . utxoBalance $ utxo
+      footer = replicate 4 "Total" : [[T.pack . show . utxoBalance $ utxo
                                      , T.pack . show . Core.getCoin . paymentAmount $ payees
-                                     , T.pack . show . Core.getCoin . utxoBalance $ pickedInputs
+                                     , T.pack . show . utxoBalance $ pickedInputs
                                      , T.pack . show . Core.getCoin . paymentAmount $ txOutputs
                                      ]]
 
@@ -324,7 +326,7 @@ feeWasPayed SenderPaysFee originalUtxo originalOutputs tx =
                     T.unpack (renderTx originalOutputs originalUtxo tx) <>
                     "\n\n"
               )
-              (< utxoBalance originalUtxo)
+              (< unsafeIntegerToCoin (utxoBalance originalUtxo))
               (paymentAmount txOutputs)
 feeWasPayed ReceiverPaysFee _ originalOutputs tx =
     let txOutputs = Core._txOutputs . Core.taTx $ tx
@@ -417,10 +419,13 @@ genMaxInputTx estimator = do
     -- Now build the transaction, attempting to make the encoded size of the transaction
     -- as large as possible.
     bimap pretty ((,maxTxSize) . encodedSize) <$> (
-        withDefConfiguration $ \pm -> do
+        withDefConfiguration $ \coreConfig -> do
             key    <- arbitrary
             inputs <- replicateM maxInputs ((,) <$> genIn <*> genOutAux)
-            mkTx pm key (NE.fromList inputs) (NE.fromList [output]) [])
+            mkTx (configProtocolMagic coreConfig)
+                 key
+                 (NE.fromList inputs)
+                 (NE.fromList [output]) [])
 
 genMaxTxSize :: Gen Byte
 genMaxTxSize = fromBytes <$> choose (4000, 100000)
@@ -475,7 +480,7 @@ mkTx :: Core.ProtocolMagic
      -> [Core.TxOutAux]
      -- ^ A list of change addresess, in the form of 'TxOutAux'(s).
      -> Gen (Either CoinSelHardErr Core.TxAux)
-mkTx pm key = mkStdTx pm (\_addr -> Right (fakeSigner key))
+mkTx pm key = mkStdTx pm return (\_addr -> Right (fakeSigner key))
 
 
 payRestrictInputsTo :: Word64
@@ -488,7 +493,7 @@ payRestrictInputsTo :: Word64
                     -> Policy
                     -> Gen RunResult
 payRestrictInputsTo maxInputs genU genP feeFunction adjustOptions bal amount policy =
-    withDefConfiguration $ \pm -> do
+    withDefConfiguration $ \coreConfig -> do
         utxo  <- genU bal
         payee <- genP utxo amount
         key   <- arbitrary
@@ -501,7 +506,11 @@ payRestrictInputsTo maxInputs genU genP feeFunction adjustOptions bal amount pol
              Left e -> return (utxo, payee, Left (STB e))
              Right (CoinSelFinalResult inputs outputs coins) -> do
                     change <- genChange utxo payee coins
-                    txAux  <- mkTx pm key inputs outputs change
+                    txAux  <- mkTx (configProtocolMagic coreConfig)
+                                   key
+                                   inputs
+                                   outputs
+                                   change
                     return (utxo, payee, bimap STB identity txAux)
 
 pay :: (InitialBalance -> Gen Core.Utxo)
@@ -707,12 +716,12 @@ spec =
 
         describe "Estimating the maximum number of inputs" $ do
             prop "estimateMaxTxInputs yields a lower bound." $
-                forAll (genMaxInputTx estimateMaxTxInputs) $ \case
+                forAll (genMaxInputTx estimateMaxTxInputsExplicitBounds) $ \case
                     Left _err        -> False
                     Right (lhs, rhs) -> lhs <= rhs
 
             prop "estimateMaxTxInputs yields a relatively tight bound." $
-                forAll (genMaxInputTx $ \x y z -> 1 + estimateHardMaxTxInputs x y z) $ \case
+                forAll (genMaxInputTx $ \x y z -> 1 + estimateHardMaxTxInputsExplicitBounds x y z) $ \case
                     Left _err        -> False
                     Right (lhs, rhs) -> lhs > rhs
 
@@ -720,7 +729,7 @@ spec =
                 forAll ((,) <$> genMaxTxSize
                             <*> (getAddrAttrSize <$> genOutAux)) $
                 \(maxTxSize, addrAttrSize) ->
-                    let safeMax = estimateMaxTxInputs     addrAttrSize txAttrSize maxTxSize
-                        hardMax = estimateHardMaxTxInputs addrAttrSize txAttrSize maxTxSize
+                    let safeMax = estimateMaxTxInputsExplicitBounds     addrAttrSize txAttrSize maxTxSize
+                        hardMax = estimateHardMaxTxInputsExplicitBounds addrAttrSize txAttrSize maxTxSize
                         threshold = 5 -- percent
                     in (hardMax * 100) `div` safeMax <= 100 + threshold

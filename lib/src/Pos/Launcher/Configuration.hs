@@ -1,5 +1,6 @@
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE Rank2Types    #-}
+{-# LANGUAGE DeriveGeneric   #-}
+{-# LANGUAGE Rank2Types      #-}
+{-# LANGUAGE RecordWildCards #-}
 
 -- | Configuration for a node: values which are constant for the lifetime of
 -- the running program, not for the lifetime of the executable binary itself.
@@ -35,8 +36,6 @@ import           Data.Time.Units (fromMicroseconds)
 
 import           Data.Aeson.Options (defaultOptions)
 import           System.FilePath (takeDirectory)
-import           System.Wlog (LoggerName, WithLogger, askLoggerName, logInfo,
-                     usingLoggerName)
 
 import           Ntp.Client (NtpConfiguration)
 
@@ -44,6 +43,8 @@ import           Pos.Core (Address, decodeTextAddress)
 import           Pos.Core.Genesis (GenesisData)
 import           Pos.Core.Slotting (Timestamp (..))
 import           Pos.Util.Config (parseYamlConfig)
+import           Pos.Util.Wlog (LoggerName, WithLogger, askLoggerName, logInfo,
+                     usingLoggerName)
 
 import           Pos.Chain.Block
 import           Pos.Chain.Delegation
@@ -51,7 +52,7 @@ import           Pos.Chain.Ssc hiding (filter)
 import           Pos.Chain.Txp
 import           Pos.Chain.Update
 import           Pos.Configuration
-import           Pos.Core.Configuration
+import           Pos.Core.Configuration as Core
 
 -- | Product of all configurations required to run a node.
 data Configuration = Configuration
@@ -158,7 +159,7 @@ withConfigurationsM
     -> (GenesisData -> GenesisData)
     -- ^ change genesis data; this is useful if some parameters are passed as
     -- comand line arguments for some tools (profiling executables, benchmarks).
-    -> (HasConfigurations => ProtocolMagic -> WalletConfiguration -> TxpConfiguration -> NtpConfiguration -> m r)
+    -> (HasConfigurations => Core.Config -> TxpConfiguration -> NtpConfiguration -> m r)
     -> m r
 withConfigurationsM logName mAssetLockPath cfo fn act = do
     logInfo' ("using configurations: " <> show cfo)
@@ -172,8 +173,8 @@ withConfigurationsM logName mAssetLockPath cfo fn act = do
         withSscConfiguration (ccSsc cfg) $
         withDlgConfiguration (ccDlg cfg) $
         withBlockConfiguration (ccBlock cfg) $
-        withNodeConfiguration (ccNode cfg) $ \pm ->
-            act pm (ccWallet cfg) (addAssetLock assetLock $ ccTxp cfg) (ccNtp cfg)
+        withNodeConfiguration (ccNode cfg) $ \ coreConfig ->
+            act coreConfig (addAssetLock assetLock $ ccTxp cfg) (ccNtp cfg)
 
     where
     logInfo' :: Text -> m ()
@@ -183,7 +184,7 @@ withConfigurations
     :: (WithLogger m, MonadThrow m, MonadIO m)
     => Maybe AssetLockPath
     -> ConfigurationOptions
-    -> (HasConfigurations => ProtocolMagic -> WalletConfiguration -> TxpConfiguration -> NtpConfiguration -> m r)
+    -> (HasConfigurations => Core.Config -> TxpConfiguration -> NtpConfiguration -> m r)
     -> m r
 withConfigurations mAssetLockPath cfo act = do
     loggerName <- askLoggerName

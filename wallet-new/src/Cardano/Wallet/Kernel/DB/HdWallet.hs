@@ -23,9 +23,7 @@ module Cardano.Wallet.Kernel.DB.HdWallet (
     -- * HD Wallet state
   , HdAccountState(..)
   , HdAccountUpToDate(..)
-  , HdAccountWithinK(..)
-  , HdAccountOutsideK(..)
-  , reachedWithinK
+  , HdAccountIncomplete(..)
   , finishRestoration
     -- ** Initialiser
   , initHdWallets
@@ -54,12 +52,9 @@ module Cardano.Wallet.Kernel.DB.HdWallet (
   , hdAccountStateCurrent
     -- *** Account state: up to date
   , hdUpToDateCheckpoints
-    -- *** Account state: within K slots
-  , hdWithinKCurrent
-  , hdWithinKHistorical
-    -- *** Account state: outside K slots
-  , hdOutsideKCurrent
-  , hdOutsideKHistorical
+    -- *** Account state: under restoration
+  , hdIncompleteCurrent
+  , hdIncompleteHistorical
     -- *** Address
   , hdAddressId
   , hdAddressAddress
@@ -77,8 +72,10 @@ module Cardano.Wallet.Kernel.DB.HdWallet (
   , zoomHdRootId
   , zoomHdAccountId
   , zoomHdAddressId
+  , zoomHdCardanoAddress
   , matchHdAccountState
   , zoomHdAccountCheckpoints
+  , zoomHdAccountCurrent
   , matchHdAccountCheckpoints
     -- * Zoom variations that create on request
   , zoomOrCreateHdRoot
@@ -90,28 +87,37 @@ module Cardano.Wallet.Kernel.DB.HdWallet (
   , eskToHdRootId
   ) where
 
-import           Universum
+import           Universum hiding ((:|))
 
 import           Control.Lens (at, (+~), _Wrapped)
 import           Control.Lens.TH (makeLenses)
 import qualified Data.ByteString as BS
-import qualified Data.IxSet.Typed as IxSet
-import           Data.SafeCopy (SafeCopy (..), base, deriveSafeCopy)
+import qualified Data.IxSet.Typed as IxSet (Indexable (..))
+import           Data.SafeCopy (base, deriveSafeCopy)
 
 import           Test.QuickCheck (Arbitrary (..), oneof, vectorOf)
 
 import           Formatting (bprint, build, (%))
 import qualified Formatting.Buildable
+import           Serokell.Util (listJson)
 
 import qualified Pos.Core as Core
 import           Pos.Core.Chrono (NewestFirst (..))
 import qualified Pos.Crypto as Core
 
+import           Cardano.Wallet.API.V1.Types (V1 (..))
+import           Cardano.Wallet.Kernel.DB.BlockContext
 import           Cardano.Wallet.Kernel.DB.InDb
 import           Cardano.Wallet.Kernel.DB.Spec
 import           Cardano.Wallet.Kernel.DB.Util.AcidState
 import           Cardano.Wallet.Kernel.DB.Util.IxSet
-import           Cardano.Wallet.Kernel.Util (modifyAndGetOld, neHead)
+import qualified Cardano.Wallet.Kernel.DB.Util.IxSet as IxSet hiding (Indexable)
+import qualified Cardano.Wallet.Kernel.DB.Util.Zoomable as Z
+import           Cardano.Wallet.Kernel.NodeStateAdaptor (SecurityParameter (..))
+import           Cardano.Wallet.Kernel.Util (liftNewestFirst, modifyAndGetOld)
+import qualified Cardano.Wallet.Kernel.Util.StrictList as SL
+import           Cardano.Wallet.Kernel.Util.StrictNonEmpty (StrictNonEmpty (..))
+import qualified Cardano.Wallet.Kernel.Util.StrictNonEmpty as SNE
 
 {-------------------------------------------------------------------------------
   Supporting types
@@ -120,14 +126,8 @@ import           Cardano.Wallet.Kernel.Util (modifyAndGetOld, neHead)
 -- | Wallet name
 newtype WalletName = WalletName { getWalletName :: Text }
 
-instance Buildable WalletName where
-    build (WalletName wName) = bprint build wName
-
 -- | Account name
 newtype AccountName = AccountName { getAccountName :: Text }
-
-instance Buildable AccountName where
-    build (AccountName txt) = bprint build txt
 
 -- | Account index
 newtype HdAccountIx = HdAccountIx { getHdAccountIx :: Word32 }
@@ -158,22 +158,13 @@ assuredBlockDepth :: AssuranceLevel -> Core.BlockCount
 assuredBlockDepth AssuranceLevelNormal = 9
 assuredBlockDepth AssuranceLevelStrict = 15
 
-instance Buildable AssuranceLevel where
-    build AssuranceLevelNormal = "normal"
-    build AssuranceLevelStrict = "strict"
-
 -- | Does this wallet have a spending password
 data HasSpendingPassword =
     -- | No spending password set
     NoSpendingPassword
 
     -- | If there is a spending password, we record when it was last updated.
-  | HasSpendingPassword (InDb Core.Timestamp)
-
-instance Buildable HasSpendingPassword where
-    build NoSpendingPassword = "no"
-    build (HasSpendingPassword (InDb lastUpdate)) =
-        bprint ("updated " % build) lastUpdate
+  | HasSpendingPassword !(InDb Core.Timestamp)
 
 deriveSafeCopy 1 'base ''WalletName
 deriveSafeCopy 1 'base ''AccountName
@@ -199,7 +190,9 @@ eskToHdRootId = HdRootId . InDb . Core.makePubKeyAddressBoot . Core.encToPublic
   HD wallets
 -------------------------------------------------------------------------------}
 
--- | HD wallet root ID. Conceptually, this is just an 'Address' in the form
+-- | HD wallet root ID.
+--
+-- Conceptually, this is just an 'Address' in the form
 -- of 'Ae2tdPwUPEZ18ZjTLnLVr9CEvUEUX4eW1LBHbxxxJgxdAYHrDeSCSbCxrvx', but is,
 -- in a sense, a special breed as it's derived from the 'PublicKey' (derived
 -- from some BIP-39 mnemonics, typically) and which does not depend from any
@@ -210,7 +203,14 @@ eskToHdRootId = HdRootId . InDb . Core.makePubKeyAddressBoot . Core.encToPublic
 -- just a Text) it's possible to call 'decodeTextAddress' to grab a valid
 -- 'Core.Address', and then transform this into a 'Kernel.WalletId' type
 -- easily.
-data HdRootId = HdRootId { getHdRootId :: InDb Core.Address }
+--
+-- NOTE: Comparing 'HdRootId' is a potentially expensive computation, as it
+-- implies comparing large addresses. Use with care.
+--
+-- TODO: It would be better not to have the address here, and just use an 'Int'
+-- as a primary key. This however is a slightly larger refactoring we don't
+-- currently have time for.
+newtype HdRootId = HdRootId { getHdRootId :: InDb Core.Address }
   deriving (Eq, Ord)
 
 instance Arbitrary HdRootId where
@@ -221,20 +221,34 @@ instance Arbitrary HdRootId where
 
 -- | HD wallet account ID
 data HdAccountId = HdAccountId {
-      _hdAccountIdParent :: HdRootId
-    , _hdAccountIdIx     :: HdAccountIx
+      _hdAccountIdParent :: !HdRootId
+    , _hdAccountIdIx     :: !HdAccountIx
     }
-  deriving (Eq, Ord)
+  deriving (Eq)
+
+-- | We make sure to compare the account index first to avoid doing an
+-- unnecessary comparison of the root ID
+instance Ord HdAccountId where
+  compare a b =
+       compare (_hdAccountIdIx     a) (_hdAccountIdIx     b)
+    <> compare (_hdAccountIdParent a) (_hdAccountIdParent b)
 
 instance Arbitrary HdAccountId where
   arbitrary = HdAccountId <$> arbitrary <*> arbitrary
 
 -- | HD wallet address ID
 data HdAddressId = HdAddressId {
-      _hdAddressIdParent :: HdAccountId
-    , _hdAddressIdIx     :: HdAddressIx
+      _hdAddressIdParent :: !HdAccountId
+    , _hdAddressIdIx     :: !HdAddressIx
     }
-  deriving (Eq, Ord)
+  deriving (Eq)
+
+-- | We make sure to compare the address index first to avoid doing an
+-- unnecessary comparison of the account ID
+instance Ord HdAddressId where
+  compare a b =
+       compare (_hdAddressIdIx     a) (_hdAddressIdIx     b)
+    <> compare (_hdAddressIdParent a) (_hdAddressIdParent b)
 
 instance Arbitrary HdAddressId where
   arbitrary = HdAddressId <$> arbitrary <*> arbitrary
@@ -247,84 +261,55 @@ instance Arbitrary HdAddressId where
 -- NOTE: We do not store the encrypted key of the wallet.
 data HdRoot = HdRoot {
       -- | Wallet ID
-      _hdRootId          :: HdRootId
+      _hdRootId          :: !HdRootId
 
       -- | Wallet name
-    , _hdRootName        :: WalletName
+    , _hdRootName        :: !WalletName
 
       -- | Does this wallet have a spending password?
       --
       -- NOTE: We do not store the spending password itself, but merely record
       -- whether there is one. Updates to the spending password affect only the
       -- external key storage, not the wallet DB proper.
-    , _hdRootHasPassword :: HasSpendingPassword
+    , _hdRootHasPassword :: !HasSpendingPassword
 
       -- | Assurance level
-    , _hdRootAssurance   :: AssuranceLevel
+    , _hdRootAssurance   :: !AssuranceLevel
 
       -- | When was this wallet created?
-    , _hdRootCreatedAt   :: InDb Core.Timestamp
+    , _hdRootCreatedAt   :: !(InDb Core.Timestamp)
     }
-
-instance Buildable HdRoot where
-    build HdRoot{..} =
-        bprint (
-            "HdRoot { id = " % build %
-                 ", name = " % build %
-          ", hasPassword = " % build %
-       ", assuranceLevel = " % build %
-            ", createdAt = " % build
-        ) (_fromDb . getHdRootId $ _hdRootId)
-          _hdRootName
-          _hdRootHasPassword
-          _hdRootAssurance
-          (_fromDb _hdRootCreatedAt)
 
 -- | Account in a HD wallet
 --
 -- Key derivation is cheap
 data HdAccount = HdAccount {
       -- | Account index
-      _hdAccountId            :: HdAccountId
+      _hdAccountId            :: !HdAccountId
 
       -- | Account name
-    , _hdAccountName          :: AccountName
+    , _hdAccountName          :: !AccountName
 
       -- | Account state
       --
       -- When the account is up to date with the blockchain, the account state
       -- coincides with the state of a " wallet " as mandated by the formal
       -- spec.
-    , _hdAccountState         :: HdAccountState
+    , _hdAccountState         :: !HdAccountState
 
       -- | A local counter used to generate new 'AutoIncrementKey' for
       -- addresses.
-    , _hdAccountAutoPkCounter :: AutoIncrementKey
+    , _hdAccountAutoPkCounter :: !AutoIncrementKey
     }
-
-instance Buildable HdAccount where
-    build HdAccount{..} =
-        bprint ("HdAccount { id = "   % build
-                         % " name = " % build
-                         % " checkpoints = <checkpoints> "
-                         % " }"
-               ) _hdAccountId _hdAccountName
 
 -- | Address in an account of a HD wallet
 data HdAddress = HdAddress {
       -- | Address ID
-      _hdAddressId      :: HdAddressId
+      _hdAddressId      :: !HdAddressId
 
       -- | The actual address
-    , _hdAddressAddress :: InDb Core.Address
+    , _hdAddressAddress :: !(InDb Core.Address)
     }
-
-instance Buildable HdAddress where
-    build HdAddress{..} =
-        bprint ("HdAddress { id = "   % build
-                         % " address = " % build
-                         % " }"
-               ) _hdAddressId (_hdAddressAddress ^. fromDb)
 
 {-------------------------------------------------------------------------------
   Account state
@@ -332,80 +317,80 @@ instance Buildable HdAddress where
 
 -- | Account state (essentially, how much historical data do we have?)
 data HdAccountState =
-      HdAccountStateUpToDate !HdAccountUpToDate
-    | HdAccountStateWithinK  !HdAccountWithinK
-    | HdAccountStateOutsideK !HdAccountOutsideK
+      HdAccountStateUpToDate   !HdAccountUpToDate
+    | HdAccountStateIncomplete !HdAccountIncomplete
 
 -- | Account state for an account which has complete historical data
 data HdAccountUpToDate = HdAccountUpToDate {
-      _hdUpToDateCheckpoints :: !(NewestFirst NonEmpty Checkpoint)
+      _hdUpToDateCheckpoints :: !(Checkpoints Checkpoint)
     }
 
--- | Account state for an account which is lacking some historical checkpoints,
--- but is within k slots of the tip.
---
--- NOTE: If the wallet backend gets shut down during restoration, and later
--- restarted, it cannot be the case that the wallet is behind the full node,
--- since the full node /itself/ will also be behind the chain. The wallet can
--- /only/ be behind the full node if a wallet (that already exists on the chain)
--- gets added to a running full node.
-data HdAccountWithinK = HdAccountWithinK {
+-- | Account state for an account which is lacking some historical checkpoints
+-- (which is currently being restored)
+data HdAccountIncomplete = HdAccountIncomplete {
       -- | Current checkpoints
       --
       -- During wallet restoration we always track the underlying node, but may
       -- lack historical checkpoints. We synchronously construct a partial
       -- checkpoint for the current tip, and then as we get new blocks from
       -- the BListener, we add new partial checkpoints.
-      _hdWithinKCurrent    :: !(NewestFirst NonEmpty PartialCheckpoint)
+      _hdIncompleteCurrent    :: !(Checkpoints PartialCheckpoint)
 
       -- | Historical full checkpoints
       --
       -- Meanwhile, we asynchronously construct full checkpoints, starting
       -- from genesis. Once this gets to within k slots of the tip, we start
       -- keeping all of these.
-    , _hdWithinKHistorical :: !(NewestFirst NonEmpty Checkpoint)
-    }
-
--- | Account state for an account which is lacking historical checkpoints,
--- and hasn't reached the block that is within k slots of the tip yet.
-data HdAccountOutsideK = HdAccountOutsideK {
-      -- | Current checkpoint
-      _hdOutsideKCurrent    :: !(NewestFirst NonEmpty PartialCheckpoint)
-
-      -- | Historical full checkpoints
-      --
-      -- Since we haven't reached the block k away yet, we only need to
-      -- keep this one checkpoint.
-    , _hdOutsideKHistorical :: !Checkpoint
+    , _hdIncompleteHistorical :: !(Checkpoints Checkpoint)
     }
 
 makeLenses ''HdAccountUpToDate
-makeLenses ''HdAccountWithinK
-makeLenses ''HdAccountOutsideK
-
--- | Once we reached K slots from the tip, we should start collecting
--- checkpoints rather than just keeping the most recent.
-reachedWithinK :: HdAccountOutsideK -> HdAccountWithinK
-reachedWithinK HdAccountOutsideK{..} = HdAccountWithinK{
-      _hdWithinKCurrent    = _hdOutsideKCurrent
-    , _hdWithinKHistorical = NewestFirst $ _hdOutsideKHistorical :| []
-    }
+makeLenses ''HdAccountIncomplete
 
 -- | Restoration is complete when we have all historical checkpoints
 --
--- NOTE: The local block metadata in the partial checkpoints /already/
--- accumulates (the local block metadata in the next partial checkpoint includes
--- the local block metadata in the previous). Therefore we get the most recent
--- /full/ checkpoint, and use that as the basis for constructing full block
--- metadata for /all/ partial checkpoints.
-finishRestoration :: HdAccountWithinK -> HdAccountUpToDate
-finishRestoration HdAccountWithinK{..} = HdAccountUpToDate{
-      _hdUpToDateCheckpoints =
-           map (toFullCheckpoint mostRecent) _hdWithinKCurrent
-        <> _hdWithinKHistorical
-    }
+-- NOTE:
+--
+-- * The local block metadata in the partial checkpoints /already/
+--   accumulates (the local block metadata in the next partial checkpoint
+--   includes the local block metadata in the previous). Therefore we get the
+--   most recent /full/ checkpoint, and use that as the basis for constructing
+--   full block metadata for /all/ partial checkpoints.
+--
+-- * We do NOT use the oldest partial checkpoint, since it will have its
+--   UTxO set from the underlying node's UTxO rather than from a block, and
+--   will therefore not have valid block metadata associated with it.
+--   (It is also possible that the initial checkpoint was created later, with
+--   an empty UTxO, if we discover it /during/ restoration).
+--
+-- * We verify that the second-oldest partial checkpoint's previous pointer (if
+--   one exists) lines up with the most recent historical checkpoint.
+finishRestoration :: SecurityParameter
+                  -> HdAccountIncomplete
+                  -> HdAccountUpToDate
+finishRestoration (SecurityParameter k) (HdAccountIncomplete (Checkpoints partial) (Checkpoints historical)) =
+    case SL.last initPartial of
+      Nothing ->
+        HdAccountUpToDate $ Checkpoints $ takeNewest k $ NewestFirst $
+          (mostRecentHistorical :| olderHistorical)
+      Just secondLast | Just context <- secondLast ^. pcheckpointContext ->
+        if context `blockContextSucceeds` (mostRecentHistorical ^. checkpointContext)
+          then HdAccountUpToDate $ Checkpoints $ takeNewest k $ NewestFirst $
+                 SNE.prependList
+                   (mkFull <$> initPartial)
+                   (mostRecentHistorical :| olderHistorical)
+          else error "finishRestoration: checkpoints do not line up!"
+      _otherwise ->
+        error "finishRestoration: invalid partial checkpoint (missing context)"
   where
-    NewestFirst (mostRecent :| _) = _hdWithinKHistorical
+    (initPartial, _oldestPartial)           = SNE.splitLast $ getNewestFirst partial
+    mostRecentHistorical :| olderHistorical =                 getNewestFirst historical
+
+    mkFull :: PartialCheckpoint -> Checkpoint
+    mkFull = toFullCheckpoint (mostRecentHistorical ^. checkpointBlockMeta)
+
+    takeNewest :: Int -> NewestFirst StrictNonEmpty a -> NewestFirst StrictNonEmpty a
+    takeNewest = liftNewestFirst . SNE.take
 
 {-------------------------------------------------------------------------------
   Template Haskell splices
@@ -428,16 +413,7 @@ deriveSafeCopy 1 'base ''HdAddress
 
 deriveSafeCopy 1 'base ''HdAccountState
 deriveSafeCopy 1 'base ''HdAccountUpToDate
-deriveSafeCopy 1 'base ''HdAccountWithinK
-deriveSafeCopy 1 'base ''HdAccountOutsideK
-
-instance SafeCopy (NewestFirst NonEmpty Checkpoint)  where
-    getCopy = error "TODO: getCopy for (NewestFirst NonEmpty Checkpoint)"
-    putCopy = error "TODO: putCopy for (NewestFirst NonEmpty Checkpoint)"
-
-instance SafeCopy (NewestFirst NonEmpty PartialCheckpoint)  where
-    getCopy = error "TODO: getCopy for (NewestFirst NonEmpty Checkpoint)"
-    putCopy = error "TODO: putCopy for (NewestFirst NonEmpty Checkpoint)"
+deriveSafeCopy 1 'base ''HdAccountIncomplete
 
 {-------------------------------------------------------------------------------
   Derived lenses
@@ -457,17 +433,12 @@ hdAccountStateCurrent f (HdAccountStateUpToDate st) =
     (\pcp -> HdAccountStateUpToDate (st & l .~ pcp)) <$> f (st ^. l)
   where
     l :: Lens' HdAccountUpToDate PartialCheckpoint
-    l = hdUpToDateCheckpoints . _Wrapped . neHead . fromFullCheckpoint
-hdAccountStateCurrent f (HdAccountStateWithinK st) =
-    (\pcp -> HdAccountStateWithinK (st & l .~ pcp)) <$> f (st ^. l)
+    l = hdUpToDateCheckpoints . unCheckpoints . _Wrapped . SNE.head . fromFullCheckpoint
+hdAccountStateCurrent f (HdAccountStateIncomplete st) =
+    (\pcp -> HdAccountStateIncomplete (st & l .~ pcp)) <$> f (st ^. l)
   where
-    l :: Lens' HdAccountWithinK PartialCheckpoint
-    l = hdWithinKCurrent . _Wrapped . neHead
-hdAccountStateCurrent f (HdAccountStateOutsideK st) =
-    (\pcp -> HdAccountStateOutsideK (st & l .~ pcp)) <$> f (st ^. l)
-  where
-    l :: Lens' HdAccountOutsideK PartialCheckpoint
-    l = hdOutsideKCurrent . _Wrapped . neHead
+    l :: Lens' HdAccountIncomplete PartialCheckpoint
+    l = hdIncompleteCurrent . unCheckpoints . _Wrapped . SNE.head
 
 {-------------------------------------------------------------------------------
   Unknown identifiers
@@ -538,22 +509,16 @@ instance HasPrimKey HdAccount where
     type PrimKey HdAccount = HdAccountId
     primKey = _hdAccountId
 
-instance HasPrimKey HdAddress where
-    type PrimKey HdAddress = HdAddressId
-    primKey = _hdAddressId
-
 instance HasPrimKey (Indexed HdAddress) where
     type PrimKey (Indexed HdAddress) = HdAddressId
-    primKey = primKey . _ixedIndexed
+    primKey = _hdAddressId . _ixedIndexed
 
 type SecondaryHdRootIxs           = '[]
 type SecondaryHdAccountIxs        = '[HdRootId]
-type SecondaryHdAddressIxs        = '[HdRootId, HdAccountId, Core.Address]
-type SecondaryIndexedHdAddressIxs = '[AutoIncrementKey, HdRootId, HdAccountId, Core.Address]
+type SecondaryIndexedHdAddressIxs = '[AutoIncrementKey, HdRootId, HdAccountId, V1 Core.Address]
 
 type instance IndicesOf HdRoot              = SecondaryHdRootIxs
 type instance IndicesOf HdAccount           = SecondaryHdAccountIxs
-type instance IndicesOf HdAddress           = SecondaryHdAddressIxs
 type instance IndicesOf (Indexed HdAddress) = SecondaryIndexedHdAddressIxs
 
 instance IxSet.Indexable (HdRootId ': SecondaryHdRootIxs)
@@ -565,20 +530,13 @@ instance IxSet.Indexable (HdAccountId ': SecondaryHdAccountIxs)
     indices = ixList
                 (ixFun ((:[]) . view hdAccountRootId))
 
-instance IxSet.Indexable (HdAddressId ': SecondaryHdAddressIxs)
-                         (OrdByPrimKey HdAddress) where
-    indices = ixList
-                (ixFun ((:[]) . view hdAddressRootId))
-                (ixFun ((:[]) . view hdAddressAccountId))
-                (ixFun ((:[]) . view (hdAddressAddress . fromDb)))
-
 instance IxSet.Indexable (HdAddressId ': SecondaryIndexedHdAddressIxs)
                          (OrdByPrimKey (Indexed HdAddress)) where
     indices = ixList
                 (ixFun ((:[]) . view ixedIndex))
                 (ixFun ((:[]) . view (ixedIndexed . hdAddressRootId)))
                 (ixFun ((:[]) . view (ixedIndexed . hdAddressAccountId)))
-                (ixFun ((:[]) . view (ixedIndexed . hdAddressAddress . fromDb)))
+                (ixFun ((:[]) . V1 . view (ixedIndexed . hdAddressAddress . fromDb)))
 
 {-------------------------------------------------------------------------------
   Top-level HD wallet structure
@@ -589,16 +547,16 @@ instance IxSet.Indexable (HdAddressId ': SecondaryIndexedHdAddressIxs)
 -- We use a flat "relational" structure rather than nested maps so that we can
 -- go from address to wallet just as easily as the other way around.
 data HdWallets = HdWallets {
-    _hdWalletsRoots     :: IxSet HdRoot
-  , _hdWalletsAccounts  :: IxSet HdAccount
-  , _hdWalletsAddresses :: IxSet (Indexed HdAddress)
+    _hdWalletsRoots     :: !(IxSet HdRoot)
+  , _hdWalletsAccounts  :: !(IxSet HdAccount)
+  , _hdWalletsAddresses :: !(IxSet (Indexed HdAddress))
   }
 
 deriveSafeCopy 1 'base ''HdWallets
 makeLenses ''HdWallets
 
 initHdWallets :: HdWallets
-initHdWallets = HdWallets emptyIxSet emptyIxSet emptyIxSet
+initHdWallets = HdWallets IxSet.empty IxSet.empty IxSet.empty
 
 {-------------------------------------------------------------------------------
   Zoom to existing parts of a HD wallet
@@ -607,21 +565,21 @@ initHdWallets = HdWallets emptyIxSet emptyIxSet emptyIxSet
 zoomHdRootId :: forall f e a. CanZoom f
              => (UnknownHdRoot -> e)
              -> HdRootId
-             -> f HdRoot e a -> f HdWallets e a
+             -> f e HdRoot a -> f e HdWallets a
 zoomHdRootId embedErr rootId =
     zoomDef err (hdWalletsRoots . at rootId)
   where
-    err :: f HdWallets e a
+    err :: f e HdWallets a
     err = missing $ embedErr (UnknownHdRoot rootId)
 
 zoomHdAccountId :: forall f e a. CanZoom f
                 => (UnknownHdAccount -> e)
                 -> HdAccountId
-                -> f HdAccount e a -> f HdWallets e a
+                -> f e HdAccount a -> f e HdWallets a
 zoomHdAccountId embedErr accId =
     zoomDef err (hdWalletsAccounts . at accId)
   where
-    err :: f HdWallets e a
+    err :: f e HdWallets a
     err = zoomHdRootId embedErr' (accId ^. hdAccountIdParent) $
             missing $ embedErr (UnknownHdAccount accId)
 
@@ -631,55 +589,81 @@ zoomHdAccountId embedErr accId =
 zoomHdAddressId :: forall f e a. CanZoom f
                 => (UnknownHdAddress -> e)
                 -> HdAddressId
-                -> f HdAddress e a -> f HdWallets e a
+                -> f e HdAddress a -> f e HdWallets a
 zoomHdAddressId embedErr addrId =
     zoomDef err (hdWalletsAddresses . at addrId) . zoom ixedIndexed
   where
-    err :: f HdWallets e a
+    err :: f e HdWallets a
     err = zoomHdAccountId embedErr' (addrId ^. hdAddressIdParent) $
             missing $ embedErr (UnknownHdAddress addrId)
 
     embedErr' :: UnknownHdAccount -> e
     embedErr' = embedErr . embedUnknownHdAccount
 
+-- | Zoom to the specified Cardano address
+--
+-- This is defined on queries only for now. In principle we could define this
+-- more generally, but that would require somehow taking advantage of the  fact
+-- that there cannot be more than one 'HdAddress' with a given 'Core.Address'.
+zoomHdCardanoAddress :: forall e a.
+                        (UnknownHdAddress -> e)
+                     -> Core.Address
+                     -> Query' e HdAddress a -> Query' e HdWallets a
+zoomHdCardanoAddress embedErr addr =
+    localQuery findAddress
+  where
+    findAddress :: Query' e HdWallets HdAddress
+    findAddress = do
+        addresses <- view hdWalletsAddresses
+        maybe err return $ (fmap _ixedIndexed $ getOne $ getEQ (V1 addr) addresses)
+
+    err :: Query' e HdWallets x
+    err = missing $ embedErr (UnknownHdCardanoAddress addr)
+
 -- | Pattern match on the state of the account
 matchHdAccountState :: CanZoom f
-                    => f HdAccountUpToDate e a
-                    -> f HdAccountWithinK  e a
-                    -> f HdAccountOutsideK e a
-                    -> f HdAccount         e a
-matchHdAccountState updUpToDate updWithinK updOutsideK = withZoom $ \acc zoomTo ->
-    case acc ^. hdAccountState of
-      HdAccountStateUpToDate st ->
-        zoomTo st (\st' -> acc & hdAccountState .~ HdAccountStateUpToDate st') updUpToDate
-      HdAccountStateWithinK  st ->
-        zoomTo st (\st' -> acc & hdAccountState .~ HdAccountStateWithinK  st') updWithinK
-      HdAccountStateOutsideK st ->
-        zoomTo st (\st' -> acc & hdAccountState .~ HdAccountStateOutsideK st') updOutsideK
+                    => f e HdAccountUpToDate   a
+                    -> f e HdAccountIncomplete a
+                    -> f e HdAccount           a
+matchHdAccountState updUpToDate updIncomplete = withZoomableConstraints $
+    Z.wrap $ \acc ->
+      case acc ^. hdAccountState of
+        HdAccountStateUpToDate st -> do
+          let upd st' = acc & hdAccountState .~ HdAccountStateUpToDate  st'
+          second upd $ Z.unwrap updUpToDate st
+        HdAccountStateIncomplete st -> do
+          let upd st' = acc & hdAccountState .~ HdAccountStateIncomplete st'
+          second upd $ Z.unwrap updIncomplete st
 
 -- | Zoom to the current checkpoints of the wallet
 zoomHdAccountCheckpoints :: CanZoom f
                          => (   forall c. IsCheckpoint c
-                             => f (NewestFirst NonEmpty c) e a )
-                         -> f HdAccount e a
-zoomHdAccountCheckpoints upd =
-    matchHdAccountState
-      (zoom hdUpToDateCheckpoints upd)
-      (zoom hdWithinKCurrent      upd)
-      (zoom hdOutsideKCurrent     upd)
+                             => f e (Checkpoints c) a )
+                         -> f e HdAccount a
+zoomHdAccountCheckpoints upd = matchHdAccountCheckpoints upd upd
+
+-- | Zoom to the most recent checkpoint
+zoomHdAccountCurrent :: CanZoom f
+                     => (forall c. IsCheckpoint c => f e c a)
+                     -> f e HdAccount a
+zoomHdAccountCurrent upd = withZoomableConstraints $
+    zoomHdAccountCheckpoints $
+      Z.wrap $ \cps -> do
+        let l :: Lens' (Checkpoints c) c
+            l = unCheckpoints . _Wrapped . SNE.head
+        second (\cp' -> cps & l .~ cp') $ Z.unwrap upd (cps ^. l)
 
 -- | Variant of 'zoomHdAccountCheckpoints' that distinguishes between
 -- full checkpoints (wallet is up to date) and partial checkpoints
 -- (wallet is still recovering historical data)
 matchHdAccountCheckpoints :: CanZoom f
-                          => f (NewestFirst NonEmpty Checkpoint)        e a
-                          -> f (NewestFirst NonEmpty PartialCheckpoint) e a
-                          -> f HdAccount e a
+                          => f e (Checkpoints Checkpoint)        a
+                          -> f e (Checkpoints PartialCheckpoint) a
+                          -> f e HdAccount a
 matchHdAccountCheckpoints updFull updPartial =
     matchHdAccountState
       (zoom hdUpToDateCheckpoints updFull)
-      (zoom hdWithinKCurrent      updPartial)
-      (zoom hdOutsideKCurrent     updPartial)
+      (zoom hdIncompleteCurrent   updPartial)
 
 {-------------------------------------------------------------------------------
   Zoom to parts of the wallet, creating them if they don't exist
@@ -690,19 +674,19 @@ matchHdAccountCheckpoints updFull updPartial =
 -- Precondition: @newRoot ^. hdRootId == rootId@
 zoomOrCreateHdRoot :: HdRoot
                    -> HdRootId
-                   -> Update' HdRoot    e a
-                   -> Update' HdWallets e a
+                   -> Update' e HdRoot    a
+                   -> Update' e HdWallets a
 zoomOrCreateHdRoot newRoot rootId upd =
     zoomCreate (return newRoot) (hdWalletsRoots . at rootId) $ upd
 
 -- | Variation on 'zoomHdAccountId' that creates the 'HdAccount' if it doesn't exist
 --
 -- Precondition: @newAccount ^. hdAccountId == accountId@
-zoomOrCreateHdAccount :: (HdRootId -> Update' HdWallets e ())
+zoomOrCreateHdAccount :: (HdRootId -> Update' e HdWallets ())
                       -> HdAccount
                       -> HdAccountId
-                      -> Update' HdAccount e a
-                      -> Update' HdWallets e a
+                      -> Update' e HdAccount a
+                      -> Update' e HdWallets a
 zoomOrCreateHdAccount checkRootExists newAccount accId upd = do
     checkRootExists $ accId ^. hdAccountIdParent
     zoomCreate (return newAccount) (hdWalletsAccounts . at accId) $ upd
@@ -710,11 +694,11 @@ zoomOrCreateHdAccount checkRootExists newAccount accId upd = do
 -- | Variation on 'zoomHdAddressId' that creates the 'HdAddress' if it doesn't exist
 --
 -- Precondition: @newAddress ^. hdAddressId == AddressId@
-zoomOrCreateHdAddress :: (HdAccountId -> Update' HdWallets e ())
+zoomOrCreateHdAddress :: (HdAccountId -> Update' e HdWallets ())
                       -> HdAddress
                       -> HdAddressId
-                      -> Update' HdAddress e a
-                      -> Update' HdWallets e a
+                      -> Update' e HdAddress a
+                      -> Update' e HdWallets a
 zoomOrCreateHdAddress checkAccountExists newAddress addrId upd = do
     checkAccountExists accId
     zoomCreate createAddress
@@ -723,7 +707,7 @@ zoomOrCreateHdAddress checkAccountExists newAddress addrId upd = do
         accId :: HdAccountId
         accId = addrId ^. hdAddressIdParent
 
-        createAddress :: Update' HdWallets e (Indexed HdAddress)
+        createAddress :: Update' e HdWallets (Indexed HdAddress)
         createAddress = do
             let err = "zoomOrCreateHdAddress: we checked that the account existed "
                    <> "before calling this function, but the DB lookup failed nonetheless."
@@ -734,45 +718,132 @@ zoomOrCreateHdAddress checkAccountExists newAddress addrId upd = do
 -- | Assume that the given HdRoot exists
 --
 -- Helper function which can be used as an argument to 'zoomOrCreateHdAccount'
-assumeHdRootExists :: HdRootId -> Update' HdWallets e ()
+assumeHdRootExists :: HdRootId -> Update' e HdWallets ()
 assumeHdRootExists _id = return ()
 
 -- | Assume that the given HdAccount exists
 --
 -- Helper function which can be used as an argument to 'zoomOrCreateHdAddress'
-assumeHdAccountExists :: HdAccountId -> Update' HdWallets e ()
+assumeHdAccountExists :: HdAccountId -> Update' e HdWallets ()
 assumeHdAccountExists _id = return ()
 
 {-------------------------------------------------------------------------------
   Pretty printing
 -------------------------------------------------------------------------------}
 
-instance Buildable HdRootId where
-    build (HdRootId keyInDb)
-        = bprint ("HdRootId: "%build) (_fromDb keyInDb)
+instance Buildable WalletName where
+    build (WalletName wName) = bprint build wName
 
-instance Buildable HdAccountIx where
-    build (HdAccountIx ix)
-        = bprint ("HdAccountIx: "%build) ix
+instance Buildable AccountName where
+    build (AccountName txt) = bprint build txt
+
+instance Buildable AssuranceLevel where
+    build AssuranceLevelNormal = "normal"
+    build AssuranceLevelStrict = "strict"
+
+instance Buildable HasSpendingPassword where
+    build NoSpendingPassword = "no"
+    build (HasSpendingPassword (InDb lastUpdate)) =
+        bprint ("updated " % build) lastUpdate
+
+instance Buildable HdRoot where
+    build HdRoot{..} = bprint
+      ( "HdRoot "
+      % "{ id:          " % build
+      % ", name:        " % build
+      % ", hasPassword: " % build
+      % ", assurance:   " % build
+      % ", createdAt:   " % build
+      % "}"
+      )
+      _hdRootId
+      _hdRootName
+      _hdRootHasPassword
+      _hdRootAssurance
+      (_fromDb _hdRootCreatedAt)
+
+instance Buildable HdAccount where
+    build HdAccount{..} = bprint
+      ( "HdAccount "
+      % "{ id            " % build
+      % ", name          " % build
+      % ", state         " % build
+      % ", autoPkCounter " % build
+      % "}"
+      )
+      _hdAccountId
+      _hdAccountName
+      _hdAccountState
+      _hdAccountAutoPkCounter
+
+instance Buildable HdAccountState where
+    build (HdAccountStateUpToDate st) =
+        bprint ("HdAccountStateUpToDate " % build) st
+    build (HdAccountStateIncomplete st) =
+        bprint ("HdAccountStateIncomplete " % build) st
+
+instance Buildable HdAccountUpToDate where
+    build HdAccountUpToDate{..} = bprint
+        ( "HdAccountUpToDate "
+        % "{ checkpoints: " % listJson
+        % "}"
+        )
+        _hdUpToDateCheckpoints
+
+instance Buildable HdAccountIncomplete where
+    build HdAccountIncomplete{..} = bprint
+        ( "HdAccountIncomplete "
+        % "{ current:    " % listJson
+        % ", historical: " % listJson
+        % "}"
+        )
+        _hdIncompleteCurrent
+        _hdIncompleteHistorical
+
+instance Buildable HdAddress where
+    build HdAddress{..} = bprint
+      ( "HdAddress "
+      % "{ id      " % build
+      % ", address " % build
+      % "}"
+      )
+      _hdAddressId
+      (_fromDb _hdAddressAddress)
+
+instance Buildable HdRootId where
+    build (HdRootId addr) = bprint ("HdRootId " % build) (_fromDb addr)
 
 instance Buildable HdAccountId where
-    build (HdAccountId parentId accountIx)
-        = bprint ("HdAccountId: "%build%", "%build) parentId accountIx
-
-instance Buildable HdAddressIx where
-    build (HdAddressIx ix)
-        = bprint ("HdAddressIx: "%build) ix
+    build HdAccountId{..} = bprint
+      ( "HdAccountId "
+      % "{ parent " % build
+      % ", ix     " % build
+      % "}"
+      )
+      _hdAccountIdParent
+      _hdAccountIdIx
 
 instance Buildable HdAddressId where
-    build (HdAddressId parentId addressIx)
-        = bprint ("HdAddressId: "%build%", "%build) parentId addressIx
+    build HdAddressId{..} = bprint
+      ( "HdAddressId "
+      % " parent " % build
+      % " ix     " % build
+      % "}"
+      )
+      _hdAddressIdParent
+      _hdAddressIdIx
+
+instance Buildable HdAccountIx where
+    build (HdAccountIx ix) = bprint ("HdAccountIx " % build) ix
+
+instance Buildable HdAddressIx where
+    build (HdAddressIx ix) = bprint ("HdAddressIx " % build) ix
 
 instance Buildable UnknownHdRoot where
-    build (UnknownHdRoot rootId)
-        = bprint ("UnknownHdRoot: "%build) rootId
+    build (UnknownHdRoot rootId) = bprint ("UnknownHdRoot " % build) rootId
 
 instance Buildable UnknownHdAccount where
-    build (UnknownHdAccountRoot rootId)
-        = bprint ("UnknownHdAccountRoot: "%build) rootId
-    build (UnknownHdAccount accountId)
-        = bprint ("UnknownHdAccount accountId: "%build) accountId
+    build (UnknownHdAccountRoot rootId) =
+      bprint ("UnknownHdAccountRoot " % build) rootId
+    build (UnknownHdAccount accountId) =
+      bprint ("UnknownHdAccount accountId " % build) accountId
