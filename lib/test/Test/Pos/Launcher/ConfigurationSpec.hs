@@ -11,7 +11,6 @@ import           Pos.Core.Slotting (Timestamp (..))
 import           Pos.Launcher.Configuration (ConfigurationOptions (..),
                      defaultConfigurationOptions, withConfigurationsM)
 import           Pos.Util.Config (ConfigurationException)
-import           Pos.Util.Wlog (LoggerName (..))
 
 spec :: Spec
 spec = describe "Pos.Launcher.Configuration" $ do
@@ -25,7 +24,7 @@ spec = describe "Pos.Launcher.Configuration" $ do
             let catchFn :: ConfigurationException -> IO (Maybe ConfigurationException)
                 catchFn e = return $ Just e
             res  <- liftIO $ catch
-                (withConfigurationsM (LoggerName "test") Nothing cfo id (\_ _ _ -> return Nothing))
+                (withConfigurationsM "test" Nothing cfo id (\_ _ _ -> return Nothing))
                 catchFn
             res `shouldSatisfy` isNothing
 
